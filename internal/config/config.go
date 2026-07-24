@@ -26,6 +26,7 @@ type Config struct {
 	RoleMap   RoleMap   `yaml:"role_map"`
 	Policy    Policy    `yaml:"policy"`
 	Inventory Inventory `yaml:"inventory"`
+	Challenge Challenge `yaml:"challenge"`
 	Audit     Audit     `yaml:"audit"`
 }
 
@@ -107,6 +108,14 @@ type Inventory struct {
 	Path string `yaml:"path"`
 }
 
+// Challenge configures challenge-password (challengePassword) validation.
+type Challenge struct {
+	Backend string `yaml:"backend"` // "none" | "static"
+	// StaticSecretEnv names the env var holding the shared secret for the
+	// "static" backend.
+	StaticSecretEnv string `yaml:"static_secret_env"`
+}
+
 // Audit configures the issuance decision audit log.
 type Audit struct {
 	Path string `yaml:"path"` // append-only audit sink; empty = stdout
@@ -182,6 +191,7 @@ func Default() *Config {
 			SANConstraint:   "identity",
 		},
 		Inventory: Inventory{Backend: "none"},
+		Challenge: Challenge{Backend: "none"},
 	}
 }
 

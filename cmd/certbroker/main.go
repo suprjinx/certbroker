@@ -142,24 +142,79 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 	return nil
 }
 
-// selectAuthorizer returns the configured authorizer. The real policy pipeline
-// arrives in Phase 3; until then the safe default is DenyAll, with an explicit,
-// loudly-logged dev escape hatch.
+// selectAuthorizer builds the authorization pipeline from config. The
+// -dev-insecure-allow-all flag replaces it with AllowAllEcho (no checks) for
+// local development only.
 func selectAuthorizer(logger *slog.Logger, cfg *config.Config, devAllowAll bool, devRole string) (authz.Authorizer, error) {
-	if !devAllowAll {
-		logger.Warn("no authorization pipeline configured yet (Phase 3); all enrollment requests will be DENIED")
-		return authz.DenyAll{}, nil
+	if devAllowAll {
+		role := devRole
+		if role == "" {
+			role = cfg.RoleMap.Default
+		}
+		if role == "" {
+			return nil, errors.New("-dev-insecure-allow-all requires -dev-role or role_map.default")
+		}
+		logger.Warn("SECURITY: -dev-insecure-allow-all is set; every request is authorized WITHOUT checks",
+			"role", role)
+		return authz.AllowAllEcho{Role: role}, nil
 	}
-	role := devRole
-	if role == "" {
-		role = cfg.RoleMap.Default
+
+	inv, err := buildInventory(cfg)
+	if err != nil {
+		return nil, err
 	}
-	if role == "" {
-		return nil, errors.New("-dev-insecure-allow-all requires -dev-role or role_map.default")
+	ch, err := buildChallenge(cfg)
+	if err != nil {
+		return nil, err
 	}
-	logger.Warn("SECURITY: -dev-insecure-allow-all is set; every request is authorized WITHOUT checks",
-		"role", role)
-	return authz.AllowAllEcho{Role: role}, nil
+
+	rules := make([]authz.Rule, len(cfg.RoleMap.Rules))
+	for i, r := range cfg.RoleMap.Rules {
+		rules[i] = authz.Rule{Match: r.Match, Role: r.Role}
+	}
+
+	logger.Info("authorization pipeline configured",
+		"inventory", cfg.Inventory.Backend,
+		"challenge", cfg.Challenge.Backend,
+		"require_challenge", cfg.Policy.RequireCPP,
+		"san_mode", cfg.Policy.SANConstraint,
+	)
+	return &authz.Pipeline{
+		Inventory:        inv,
+		Challenge:        ch,
+		Roles:            authz.NewRuleSelector(rules, cfg.RoleMap.Default),
+		Constraints:      authz.NewStandardConstraints(cfg.Policy.SANConstraint, cfg.Policy.MaxValidity.Std()),
+		RequireChallenge: cfg.Policy.RequireCPP,
+		Logger:           logger,
+	}, nil
+}
+
+func buildInventory(cfg *config.Config) (authz.Inventory, error) {
+	switch cfg.Inventory.Backend {
+	case "", "none":
+		return authz.NoInventory{}, nil
+	case "file":
+		if cfg.Inventory.Path == "" {
+			return nil, errors.New("inventory.path is required for the file backend")
+		}
+		return authz.NewFileInventory(cfg.Inventory.Path)
+	default:
+		return nil, errors.New("unsupported inventory backend: " + cfg.Inventory.Backend)
+	}
+}
+
+func buildChallenge(cfg *config.Config) (authz.ChallengeValidator, error) {
+	switch cfg.Challenge.Backend {
+	case "", "none":
+		return authz.NoChallenge{}, nil
+	case "static":
+		if cfg.Challenge.StaticSecretEnv == "" {
+			return nil, errors.New("challenge.static_secret_env is required for the static backend")
+		}
+		return authz.NewStaticSecret(os.Getenv(cfg.Challenge.StaticSecretEnv))
+	default:
+		return nil, errors.New("unsupported challenge backend: " + cfg.Challenge.Backend)
+	}
 }
 
 // healthHandler serves liveness and readiness. Readiness probes OpenBao by
