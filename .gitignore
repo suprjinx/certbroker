@@ -1,0 +1,6 @@
+# Build output
+/bin/
+coverage.out
+
+# Generated development key material — never commit private keys.
+/deploy/pki/

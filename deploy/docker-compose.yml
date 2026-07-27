@@ -1,0 +1,98 @@
+# Local development stack: OpenBao (dev mode) + certbroker.
+#
+# DEV ONLY — dev-mode OpenBao keeps its data in memory, unseals itself, and is
+# reachable over plaintext HTTP with a fixed root token.
+#
+# Bring up with:  make dev-up      (runs gen-certs.sh first)
+# Tear down with: make dev-down
+
+name: certbroker-dev
+
+services:
+  openbao:
+    image: openbao/openbao:2.4.1
+    command: server -dev -dev-root-token-id=dev-root-token -dev-listen-address=0.0.0.0:8200
+    environment:
+      BAO_ADDR: http://127.0.0.1:8200
+    cap_add:
+      # OpenBao mlocks memory to keep key material out of swap.
+      - IPC_LOCK
+    ports:
+      - "127.0.0.1:8200:8200"
+    healthcheck:
+      test: ["CMD", "bao", "status"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot: creates the PKI mount, issuing role, and AppRole, then writes the
+  # SecretID and device CA into the shared volume for the broker to pick up.
+  provision:
+    image: openbao/openbao:2.4.1
+    depends_on:
+      openbao:
+        condition: service_healthy
+    environment:
+      BAO_ADDR: http://openbao:8200
+      BAO_TOKEN: dev-root-token
+    volumes:
+      - ./provision-openbao.sh:/provision.sh:ro
+      - shared:/shared
+    entrypoint: ["/bin/sh", "/provision.sh"]
+    restart: "no"
+
+  certbroker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      provision:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8443:8443"
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./config.yaml:/etc/certbroker/config.yaml:ro
+      - ./inventory.yaml:/etc/certbroker/inventory.yaml:ro
+      - ./pki:/etc/certbroker/pki:ro
+      - shared:/run/certbroker:ro
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      # distroless has no shell or curl, so the check runs against the health
+      # listener from the OpenBao image instead — see the `healthcheck` service.
+      disable: true
+
+  # The broker image has no shell, so its liveness is probed from a sidecar that
+  # does. This exists for compose ergonomics only; a real orchestrator uses an
+  # HTTP probe against :9090 directly and needs no such helper.
+  healthcheck:
+    image: openbao/openbao:2.4.1
+    depends_on:
+      - certbroker
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "waiting for certbroker readiness..."
+        i=0
+        while [ $$i -lt 60 ]; do
+          if wget -q -O- http://certbroker:9090/readyz 2>/dev/null; then
+            echo ""
+            echo "certbroker is ready"
+            exit 0
+          fi
+          i=$$((i + 1))
+          sleep 1
+        done
+        echo "certbroker did not become ready" >&2
+        wget -q -O- http://certbroker:9090/readyz || true
+        exit 1
+    restart: "no"
+
+volumes:
+  # Carries provision output (AppRole SecretID, device CA) to the broker.
+  shared:

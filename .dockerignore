@@ -1,0 +1,10 @@
+# Keep the build context to source only. Generated key material in particular
+# must never reach the image or the build cache.
+.git
+.claude
+deploy/pki
+deploy/secrets
+docs
+*.md
+!go.mod
+!go.sum

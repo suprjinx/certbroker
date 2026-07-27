@@ -1,0 +1,31 @@
+# Device allowlist for the dev stack.
+#
+# A device must match an entry here or the pipeline denies it — the inventory is
+# the "is this device permitted at all?" gate, evaluated before role selection
+# and constraint policy. Every match key that is set on an entry must match;
+# empty keys are ignored.
+#
+# Match keys: cn (glob, against the authenticated CN or else the requested CN),
+# serial (exact hex), fingerprint (exact sha256 hex of the cert DER).
+
+devices:
+  # A single named device, pinned to exactly the name it may hold.
+  - cn: device01.example.com
+    allowed_dns:
+      - device01.example.com
+
+  # A glob covering a fleet. Broad globs are convenient and are exactly how an
+  # inventory stops being a meaningful gate — prefer per-device entries, or at
+  # minimum keep allowed_dns tight so a matched device still cannot request an
+  # arbitrary name.
+  - cn: "device*.example.com"
+    allowed_dns:
+      - "device*.example.com"
+
+  # An entry that additionally demands a challengePassword. Requires a challenge
+  # backend to be configured, otherwise the pipeline denies (fail closed).
+  # - cn: "sensitive*.example.com"
+  #   require_challenge: true
+  #   allowed_dns:
+  #     - "sensitive*.example.com"
+  #   role: high-assurance-role

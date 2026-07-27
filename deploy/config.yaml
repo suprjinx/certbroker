@@ -1,0 +1,71 @@
+# certbroker configuration for the local docker-compose stack.
+#
+# DEV ONLY. Differences from a production config are called out inline; see
+# docs/runbook.md for the full list.
+
+server:
+  listen_addr: ":8443"
+  health_addr: ":9090"
+  tls_cert_file: /etc/certbroker/pki/server.pem
+  tls_key_file: /etc/certbroker/pki/server.key
+  read_timeout: 15s
+  read_header_timeout: 10s
+  write_timeout: 30s
+  idle_timeout: 60s
+  shutdown_timeout: 10s
+  max_request_bytes: 262144
+  max_header_bytes: 16384
+
+openbao:
+  # DEV: plaintext HTTP to a dev-mode server. Production must be https with
+  # ca_cert_file set, or the AppRole SecretID and every issued cert are exposed.
+  address: http://openbao:8200
+  mount: pki_int
+  max_retries: 3
+  approle:
+    mount_path: approle
+    role_id: certbroker-dev-role-id
+    # Written by provision-openbao.sh into the shared volume.
+    secret_id_file: /run/certbroker/approle-secret-id
+    renew_threshold: 5m
+
+trust:
+  # First enrollment is gated by the bootstrap CA...
+  bootstrap_ca_file: /etc/certbroker/pki/bootstrap-ca.pem
+  # ...re-enrollment by the CA that actually issued the device's current cert,
+  # which is OpenBao's PKI mount. Keeping these distinct is the point: a
+  # bootstrap credential must not be reusable as a renewal credential.
+  device_ca_file: /run/certbroker/device-ca.pem
+
+role_map:
+  default: device-role
+  rules:
+    - match: "ou=devices"
+      role: device-role
+
+policy:
+  allowed_key_types: ["rsa-2048", "rsa-3072", "rsa-4096", "ec-p256", "ec-p384"]
+  min_rsa_bits: 2048
+  max_rsa_bits: 8192
+  max_validity: 720h
+  require_challenge_password: false
+  # "identity" pins issued names to the authenticated cert, falling back to the
+  # inventory allowlist for unauthenticated bootstrap.
+  san_constraint: identity
+
+inventory:
+  backend: file
+  path: /etc/certbroker/inventory.yaml
+
+challenge:
+  backend: none
+
+limits:
+  per_client_rate: 1
+  per_client_burst: 5
+  global_rate: 50
+  global_burst: 100
+  max_concurrent: 32
+  acquire_timeout: 5s
+  max_tracked_clients: 65536
+  upstream_timeout: 20s
