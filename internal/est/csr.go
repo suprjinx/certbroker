@@ -14,18 +14,64 @@ import (
 // oidChallengePassword is the PKCS#9 challengePassword attribute (1.2.840.113549.1.9.7).
 var oidChallengePassword = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 7}
 
+// RSA modulus bounds applied to every CSR before its signature is verified.
+// The floor rejects keys too weak to be worth issuing against; the ceiling
+// bounds the cost of the proof-of-possession check, which the broker performs
+// on unauthenticated input.
+const (
+	DefaultMinRSABits = 2048
+	DefaultMaxRSABits = 8192
+)
+
 // ParseCSR decodes a DER PKCS#10 request and verifies its self-signature, which
 // is the proof-of-possession that the requester holds the private key. Go's
 // x509.ParseCertificateRequest does NOT check the signature, so we do it here.
+// Default RSA bounds apply.
 func ParseCSR(der []byte) (*x509.CertificateRequest, error) {
+	return ParseCSRLimited(der, DefaultMinRSABits, DefaultMaxRSABits)
+}
+
+// ParseCSRLimited is ParseCSR with explicit RSA modulus bounds. Non-positive
+// bounds fall back to the defaults.
+//
+// Key size is checked BEFORE the signature. Verification cost scales with the
+// modulus, and at this point in the request the caller is entirely
+// unauthenticated, so an oversized key must be rejected on the cheap path
+// rather than after doing the expensive work.
+func ParseCSRLimited(der []byte, minRSABits, maxRSABits int) (*x509.CertificateRequest, error) {
 	csr, err := x509.ParseCertificateRequest(der)
 	if err != nil {
 		return nil, fmt.Errorf("parse CSR: %w", err)
+	}
+	if err := checkRSABounds(csr.PublicKey, minRSABits, maxRSABits); err != nil {
+		return nil, err
 	}
 	if err := csr.CheckSignature(); err != nil {
 		return nil, fmt.Errorf("CSR proof-of-possession failed: %w", err)
 	}
 	return csr, nil
+}
+
+// checkRSABounds enforces the modulus size limits on RSA keys. Other key types
+// have fixed, small verification costs and pass through.
+func checkRSABounds(pub any, minBits, maxBits int) error {
+	rsaPub, ok := pub.(*rsa.PublicKey)
+	if !ok {
+		return nil
+	}
+	if minBits <= 0 {
+		minBits = DefaultMinRSABits
+	}
+	if maxBits <= 0 {
+		maxBits = DefaultMaxRSABits
+	}
+	switch bits := rsaPub.N.BitLen(); {
+	case bits < minBits:
+		return fmt.Errorf("RSA key too small: %d bits, minimum %d", bits, minBits)
+	case bits > maxBits:
+		return fmt.Errorf("RSA key too large: %d bits, maximum %d", bits, maxBits)
+	}
+	return nil
 }
 
 // KeyType returns a normalized token describing the CSR's public key, e.g.

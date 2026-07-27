@@ -1,5 +1,6 @@
-// Package config loads and validates broker configuration from a YAML file,
-// with secrets supplied via the environment.
+// Package config loads and validates broker configuration from a YAML file.
+// Secrets are never stored in that file: they are referenced by the path of a
+// mounted file or the name of an environment variable.
 //
 // The broker treats OpenBao as externally managed: it never creates or
 // modifies PKI roles. It assumes the configured mount is an intermediate
@@ -13,6 +14,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -27,6 +29,7 @@ type Config struct {
 	Policy    Policy    `yaml:"policy"`
 	Inventory Inventory `yaml:"inventory"`
 	Challenge Challenge `yaml:"challenge"`
+	Limits    Limits    `yaml:"limits"`
 	Audit     Audit     `yaml:"audit"`
 }
 
@@ -38,14 +41,50 @@ type Server struct {
 	TLSKeyFile   string   `yaml:"tls_key_file"`  // server key (PEM)
 	ReadTimeout  Duration `yaml:"read_timeout"`
 	WriteTimeout Duration `yaml:"write_timeout"`
+	// ReadHeaderTimeout bounds the TLS handshake plus request headers. This is
+	// the Slowloris guard: without it a connection can hold a slot open by
+	// dribbling header bytes forever.
+	ReadHeaderTimeout Duration `yaml:"read_header_timeout"`
+	// IdleTimeout closes kept-alive connections that go quiet, so idle peers
+	// cannot accumulate and exhaust file descriptors.
+	IdleTimeout Duration `yaml:"idle_timeout"`
 	// MaxRequestBytes bounds enrollment request bodies (0 = handler default).
 	MaxRequestBytes int64 `yaml:"max_request_bytes"`
+	// MaxHeaderBytes bounds request headers (0 = Go default, 1MB).
+	MaxHeaderBytes int `yaml:"max_header_bytes"`
+	// ShutdownTimeout bounds graceful shutdown before in-flight requests are cut.
+	ShutdownTimeout Duration `yaml:"shutdown_timeout"`
 	// HealthAddr serves health/metrics on a separate non-mTLS listener.
 	HealthAddr string `yaml:"health_addr"` // e.g. ":9090"
 }
 
+// Limits configures the denial-of-service controls in front of the enrollment
+// handlers. Enrollment verifies attacker-supplied signatures before any
+// authorization is possible, so this bounds unauthenticated work.
+//
+// A negative rate or burst disables that limiter; zero takes the default.
+type Limits struct {
+	// PerClientRate/Burst bound one source IP (requests/second, bucket depth).
+	PerClientRate  float64 `yaml:"per_client_rate"`
+	PerClientBurst float64 `yaml:"per_client_burst"`
+	// GlobalRate/Burst bound the listener as a whole, catching distributed
+	// floods that stay under the per-client limit.
+	GlobalRate  float64 `yaml:"global_rate"`
+	GlobalBurst float64 `yaml:"global_burst"`
+	// MaxConcurrent bounds requests inside the handler simultaneously.
+	MaxConcurrent int `yaml:"max_concurrent"`
+	// AcquireTimeout is how long a request waits for a concurrency slot before
+	// being shed with 503.
+	AcquireTimeout Duration `yaml:"acquire_timeout"`
+	// MaxTrackedClients bounds the per-client bucket table so that tracking
+	// cannot itself be turned into memory exhaustion.
+	MaxTrackedClients int `yaml:"max_tracked_clients"`
+	// UpstreamTimeout bounds a single OpenBao call made while serving a request.
+	UpstreamTimeout Duration `yaml:"upstream_timeout"`
+}
+
 // OpenBao configures the upstream OpenBao/Vault connection. The broker
-// authenticates via AppRole; the SecretID is supplied via env, never the file.
+// authenticates via AppRole; the SecretID is referenced, never inlined here.
 type OpenBao struct {
 	Address    string `yaml:"address"`      // https://openbao.internal:8200
 	Mount      string `yaml:"mount"`        // PKI mount path, e.g. "pki_int"
@@ -55,11 +94,17 @@ type OpenBao struct {
 	AppRole AppRole `yaml:"approle"`
 }
 
-// AppRole holds AppRole auth material. SecretID must come from the environment.
+// AppRole holds AppRole auth material. The SecretID is never written in the
+// config file itself; it comes from a file or an environment variable.
 type AppRole struct {
-	MountPath      string   `yaml:"mount_path"` // auth mount, default "approle"
-	RoleID         string   `yaml:"role_id"`
-	SecretIDEnv    string   `yaml:"secret_id_env"` // env var name holding the SecretID
+	MountPath string `yaml:"mount_path"` // auth mount, default "approle"
+	RoleID    string `yaml:"role_id"`
+	// SecretIDFile reads the SecretID from a file. Preferred over the env var:
+	// a mounted secret can be rotated in place and does not appear in /proc,
+	// process listings, or crash dumps. Takes precedence when both are set.
+	SecretIDFile string `yaml:"secret_id_file"`
+	// SecretIDEnv names the env var holding the SecretID.
+	SecretIDEnv    string   `yaml:"secret_id_env"`
 	RenewThreshold Duration `yaml:"renew_threshold"`
 }
 
@@ -95,6 +140,10 @@ type Policy struct {
 	AllowedKeyTypes []string `yaml:"allowed_key_types"` // e.g. ["rsa-2048","ec-p256"]
 	MaxValidity     Duration `yaml:"max_validity"`
 	RequireCPP      bool     `yaml:"require_challenge_password"`
+	// MinRSABits/MaxRSABits bound CSR RSA moduli. The ceiling also caps the cost
+	// of the proof-of-possession check, which runs before authorization.
+	MinRSABits int `yaml:"min_rsa_bits"`
+	MaxRSABits int `yaml:"max_rsa_bits"`
 	// SANConstraint controls whether requested SANs must be derivable from the
 	// authenticated identity ("identity") or matched against allowlists ("allowlist").
 	SANConstraint string `yaml:"san_constraint"`
@@ -129,16 +178,25 @@ type Duration time.Duration
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 // UnmarshalYAML implements yaml.Unmarshaler.
+//
+// A bare scalar decodes into a string even when it is an integer node, so the
+// integer-seconds form has to be tried after ParseDuration fails rather than
+// after the string decode fails — otherwise "30" would be a hard error.
 func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
 	if err := value.Decode(&s); err == nil {
-		parsed, perr := time.ParseDuration(s)
-		if perr != nil {
-			return fmt.Errorf("invalid duration %q: %w", s, perr)
+		if parsed, perr := time.ParseDuration(s); perr == nil {
+			*d = Duration(parsed)
+			return nil
 		}
-		*d = Duration(parsed)
-		return nil
+		var secs int64
+		if ierr := value.Decode(&secs); ierr == nil {
+			*d = Duration(time.Duration(secs) * time.Second)
+			return nil
+		}
+		return fmt.Errorf("invalid duration %q: expected a duration string (e.g. \"15s\") or integer seconds", s)
 	}
+
 	var secs int64
 	if err := value.Decode(&secs); err != nil {
 		return fmt.Errorf("duration must be a string or integer seconds: %w", err)
@@ -170,10 +228,14 @@ func Load(path string) (*Config, error) {
 func Default() *Config {
 	return &Config{
 		Server: Server{
-			ListenAddr:   ":8443",
-			ReadTimeout:  Duration(15 * time.Second),
-			WriteTimeout: Duration(30 * time.Second),
-			HealthAddr:   ":9090",
+			ListenAddr:        ":8443",
+			ReadTimeout:       Duration(15 * time.Second),
+			WriteTimeout:      Duration(30 * time.Second),
+			ReadHeaderTimeout: Duration(10 * time.Second),
+			IdleTimeout:       Duration(60 * time.Second),
+			MaxHeaderBytes:    16 * 1024,
+			ShutdownTimeout:   Duration(10 * time.Second),
+			HealthAddr:        ":9090",
 		},
 		OpenBao: OpenBao{
 			Mount:      "pki_int",
@@ -189,9 +251,21 @@ func Default() *Config {
 			MaxValidity:     Duration(90 * 24 * time.Hour),
 			RequireCPP:      false,
 			SANConstraint:   "identity",
+			MinRSABits:      2048,
+			MaxRSABits:      8192,
 		},
 		Inventory: Inventory{Backend: "none"},
 		Challenge: Challenge{Backend: "none"},
+		Limits: Limits{
+			PerClientRate:     1,
+			PerClientBurst:    5,
+			GlobalRate:        50,
+			GlobalBurst:       100,
+			MaxConcurrent:     32,
+			AcquireTimeout:    Duration(5 * time.Second),
+			MaxTrackedClients: 65536,
+			UpstreamTimeout:   Duration(20 * time.Second),
+		},
 	}
 }
 
@@ -206,10 +280,16 @@ func (c *Config) Validate() error {
 	if c.OpenBao.AppRole.RoleID == "" {
 		return fmt.Errorf("openbao.approle.role_id is required")
 	}
-	if env := c.OpenBao.AppRole.SecretIDEnv; env == "" {
-		return fmt.Errorf("openbao.approle.secret_id_env is required")
-	} else if _, ok := os.LookupEnv(env); !ok {
-		return fmt.Errorf("secret id env %q is not set", env)
+	switch ar := c.OpenBao.AppRole; {
+	case ar.SecretIDFile != "":
+		// Presence is checked at startup rather than here so a not-yet-mounted
+		// secret produces one clear error from ResolveSecretID.
+	case ar.SecretIDEnv == "":
+		return fmt.Errorf("one of openbao.approle.secret_id_file or openbao.approle.secret_id_env is required")
+	default:
+		if _, ok := os.LookupEnv(ar.SecretIDEnv); !ok {
+			return fmt.Errorf("secret id env %q is not set", ar.SecretIDEnv)
+		}
 	}
 	if c.Server.TLSCertFile == "" || c.Server.TLSKeyFile == "" {
 		return fmt.Errorf("server.tls_cert_file and server.tls_key_file are required")
@@ -220,11 +300,40 @@ func (c *Config) Validate() error {
 	if c.RoleMap.Default == "" && len(c.RoleMap.Rules) == 0 {
 		return fmt.Errorf("role_map must define a default role or at least one rule")
 	}
+	if c.Policy.MinRSABits > 0 && c.Policy.MaxRSABits > 0 && c.Policy.MinRSABits > c.Policy.MaxRSABits {
+		return fmt.Errorf("policy.min_rsa_bits (%d) exceeds policy.max_rsa_bits (%d)",
+			c.Policy.MinRSABits, c.Policy.MaxRSABits)
+	}
+	// In the limits package 0 means "use the built-in default" and a negative
+	// means "disable". An explicit 0 in the file therefore reads as "unlimited"
+	// but silently applies the default; reject it rather than surprise the
+	// operator in either direction.
+	if c.Limits.PerClientRate == 0 {
+		return fmt.Errorf("limits.per_client_rate: 0 is ambiguous; omit the key for the default or set a negative value to disable")
+	}
+	if c.Limits.GlobalRate == 0 {
+		return fmt.Errorf("limits.global_rate: 0 is ambiguous; omit the key for the default or set a negative value to disable")
+	}
 	return nil
 }
 
-// ResolveSecretID reads the AppRole SecretID from its configured env var.
+// ResolveSecretID reads the AppRole SecretID from its configured source, with
+// the file taking precedence over the environment variable.
 func (c *Config) ResolveSecretID() (string, error) {
+	if path := c.OpenBao.AppRole.SecretIDFile; path != "" {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("read secret id file: %w", err)
+		}
+		// Trailing newlines are near-universal in mounted secrets and shell
+		// redirection; a stray one would fail the login with an opaque 400.
+		v := strings.TrimSpace(string(raw))
+		if v == "" {
+			return "", fmt.Errorf("secret id file %q is empty", path)
+		}
+		return v, nil
+	}
+
 	v, ok := os.LookupEnv(c.OpenBao.AppRole.SecretIDEnv)
 	if !ok || v == "" {
 		return "", fmt.Errorf("secret id env %q is empty", c.OpenBao.AppRole.SecretIDEnv)

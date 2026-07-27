@@ -18,6 +18,7 @@ import (
 	"github.com/gr-oss/certbroker/internal/bao"
 	"github.com/gr-oss/certbroker/internal/config"
 	"github.com/gr-oss/certbroker/internal/est"
+	"github.com/gr-oss/certbroker/internal/limits"
 )
 
 func main() {
@@ -88,24 +89,61 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 		Authorizer:      authorizer,
 		AllowedKeyTypes: cfg.Policy.AllowedKeyTypes,
 		MaxRequestBytes: cfg.Server.MaxRequestBytes,
+		MinRSABits:      cfg.Policy.MinRSABits,
+		MaxRSABits:      cfg.Policy.MaxRSABits,
+		UpstreamTimeout: cfg.Limits.UpstreamTimeout.Std(),
 		Logger:          logger,
 	})
 	if err != nil {
 		return err
 	}
 
+	// --- DoS controls ---
+	// Wrapped outside the EST handler so rate limiting happens before any CSR
+	// parsing or signature verification, which is the work being protected.
+	limiter := limits.New(limits.Config{
+		PerClientRate:  cfg.Limits.PerClientRate,
+		PerClientBurst: cfg.Limits.PerClientBurst,
+		GlobalRate:     cfg.Limits.GlobalRate,
+		GlobalBurst:    cfg.Limits.GlobalBurst,
+		MaxConcurrent:  cfg.Limits.MaxConcurrent,
+		AcquireTimeout: cfg.Limits.AcquireTimeout.Std(),
+		MaxClients:     cfg.Limits.MaxTrackedClients,
+		Logger:         logger,
+	})
+	logger.Info("request limits configured",
+		"per_client_rate", cfg.Limits.PerClientRate,
+		"per_client_burst", cfg.Limits.PerClientBurst,
+		"global_rate", cfg.Limits.GlobalRate,
+		"global_burst", cfg.Limits.GlobalBurst,
+		"max_concurrent", cfg.Limits.MaxConcurrent,
+		"max_request_bytes", cfg.Server.MaxRequestBytes,
+	)
+
 	// --- servers ---
 	estSrv := &http.Server{
-		Addr:         cfg.Server.ListenAddr,
-		Handler:      handler,
-		TLSConfig:    est.TLSConfig(serverCert),
-		ReadTimeout:  cfg.Server.ReadTimeout.Std(),
-		WriteTimeout: cfg.Server.WriteTimeout.Std(),
-		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
+		Addr:              cfg.Server.ListenAddr,
+		Handler:           limiter.Middleware(handler),
+		TLSConfig:         est.TLSConfig(serverCert),
+		ReadTimeout:       cfg.Server.ReadTimeout.Std(),
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Std(),
+		WriteTimeout:      cfg.Server.WriteTimeout.Std(),
+		IdleTimeout:       cfg.Server.IdleTimeout.Std(),
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
+	// The health listener is unauthenticated, so it gets the same connection
+	// timeouts. It is not rate limited: probes must not be shed, and it should
+	// be bound to a management interface rather than exposed.
 	healthSrv := &http.Server{
-		Addr:    cfg.Server.HealthAddr,
-		Handler: healthHandler(baoClient),
+		Addr:              cfg.Server.HealthAddr,
+		Handler:           healthHandler(baoClient),
+		ReadTimeout:       cfg.Server.ReadTimeout.Std(),
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Std(),
+		WriteTimeout:      cfg.Server.WriteTimeout.Std(),
+		IdleTimeout:       cfg.Server.IdleTimeout.Std(),
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
 	errCh := make(chan error, 2)
@@ -134,7 +172,11 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 		logger.Info("shutdown signal received")
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownTimeout := cfg.Server.ShutdownTimeout.Std()
+	if shutdownTimeout <= 0 {
+		shutdownTimeout = 10 * time.Second
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	_ = estSrv.Shutdown(shutdownCtx)
 	_ = healthSrv.Shutdown(shutdownCtx)

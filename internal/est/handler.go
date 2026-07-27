@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/textproto"
 	"strings"
+	"time"
 
 	"github.com/gr-oss/certbroker/internal/authz"
 	"github.com/gr-oss/certbroker/internal/bao"
@@ -26,6 +27,10 @@ const wellKnownPrefix = "/.well-known/est/"
 // defaultMaxRequestBytes bounds an enrollment request body (a CSR is small; this
 // is a DoS guard, not a functional limit).
 const defaultMaxRequestBytes = 256 * 1024
+
+// defaultUpstreamTimeout bounds a single OpenBao call made while serving a
+// request.
+const defaultUpstreamTimeout = 20 * time.Second
 
 const (
 	ctPKCS7CertsOnly = "application/pkcs7-mime; smime-type=certs-only"
@@ -59,14 +64,22 @@ type Options struct {
 	CSRAttrs []byte
 	// MaxRequestBytes bounds request bodies; 0 uses defaultMaxRequestBytes.
 	MaxRequestBytes int64
+	// MinRSABits/MaxRSABits bound CSR RSA moduli; 0 uses the package defaults.
+	MinRSABits int
+	MaxRSABits int
+	// UpstreamTimeout bounds a single OpenBao call; 0 uses defaultUpstreamTimeout.
+	// This is separate from the server's write timeout: an unresponsive OpenBao
+	// must not pin request goroutines (and their concurrency slots) indefinitely.
+	UpstreamTimeout time.Duration
 	Logger          *slog.Logger
 }
 
 type handler struct {
-	opts   Options
-	logger *slog.Logger
-	authz  authz.Authorizer
-	maxReq int64
+	opts     Options
+	logger   *slog.Logger
+	authz    authz.Authorizer
+	maxReq   int64
+	upstream time.Duration
 }
 
 // NewHandler builds the EST HTTP handler.
@@ -75,10 +88,11 @@ func NewHandler(opts Options) (http.Handler, error) {
 		return nil, errors.New("est: Enroller is required")
 	}
 	h := &handler{
-		opts:   opts,
-		logger: opts.Logger,
-		authz:  opts.Authorizer,
-		maxReq: opts.MaxRequestBytes,
+		opts:     opts,
+		logger:   opts.Logger,
+		authz:    opts.Authorizer,
+		maxReq:   opts.MaxRequestBytes,
+		upstream: opts.UpstreamTimeout,
 	}
 	if h.logger == nil {
 		h.logger = slog.Default()
@@ -89,7 +103,20 @@ func NewHandler(opts Options) (http.Handler, error) {
 	if h.maxReq <= 0 {
 		h.maxReq = defaultMaxRequestBytes
 	}
+	if h.upstream <= 0 {
+		h.upstream = defaultUpstreamTimeout
+	}
 	return h, nil
+}
+
+// upstreamCtx derives a context bounding one OpenBao call.
+func (h *handler) upstreamCtx(r *http.Request) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(r.Context(), h.upstream)
+}
+
+// parseCSR applies the handler's configured key bounds.
+func (h *handler) parseCSR(der []byte) (*x509.CertificateRequest, error) {
+	return ParseCSRLimited(der, h.opts.MinRSABits, h.opts.MaxRSABits)
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -136,7 +163,10 @@ func (h *handler) methodGuard(w http.ResponseWriter, r *http.Request, method str
 
 // caCerts serves the CA chain as a certs-only PKCS#7 (RFC 7030 §4.1).
 func (h *handler) caCerts(w http.ResponseWriter, r *http.Request) {
-	chainPEM, err := h.opts.Enroller.CAChain(r.Context())
+	ctx, cancel := h.upstreamCtx(r)
+	defer cancel()
+
+	chainPEM, err := h.opts.Enroller.CAChain(ctx)
 	if err != nil {
 		h.logger.Error("cacerts: fetch chain", "err", err)
 		http.Error(w, "upstream error", http.StatusBadGateway)
@@ -166,7 +196,7 @@ func (h *handler) enroll(w http.ResponseWriter, r *http.Request, op authz.Operat
 		http.Error(w, err.Error(), status)
 		return
 	}
-	csr, err := ParseCSR(csrDER)
+	csr, err := h.parseCSR(csrDER)
 	if err != nil {
 		http.Error(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
 		return
@@ -209,7 +239,10 @@ func (h *handler) enroll(w http.ResponseWriter, r *http.Request, op authz.Operat
 	}
 
 	csrPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}))
-	bundle, err := h.opts.Enroller.Sign(r.Context(), decision.Role, csrPEM, toSignOptions(decision.Constraints))
+	ctx, cancel := h.upstreamCtx(r)
+	defer cancel()
+
+	bundle, err := h.opts.Enroller.Sign(ctx, decision.Role, csrPEM, toSignOptions(decision.Constraints))
 	if err != nil {
 		h.audit(op, req, decision, "issue-error", err)
 		http.Error(w, "issuance failed", http.StatusBadGateway)
@@ -241,9 +274,13 @@ func (h *handler) serverKeyGen(w http.ResponseWriter, r *http.Request, label str
 		http.Error(w, err.Error(), status)
 		return
 	}
-	csr, err := ParseCSR(csrDER)
+	csr, err := h.parseCSR(csrDER)
 	if err != nil {
 		http.Error(w, "invalid CSR: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := ValidateKeyType(csr, h.opts.AllowedKeyTypes); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
 		return
 	}
 	cp, err := ChallengePassword(csr)
@@ -276,7 +313,10 @@ func (h *handler) serverKeyGen(w http.ResponseWriter, r *http.Request, label str
 		return
 	}
 
-	bundle, err := h.opts.Enroller.Issue(r.Context(), decision.Role, decision.Constraints.CommonName, toSignOptions(decision.Constraints))
+	ctx, cancel := h.upstreamCtx(r)
+	defer cancel()
+
+	bundle, err := h.opts.Enroller.Issue(ctx, decision.Role, decision.Constraints.CommonName, toSignOptions(decision.Constraints))
 	if err != nil {
 		h.audit(authz.OpServerKeyGen, req, decision, "issue-error", err)
 		http.Error(w, "issuance failed", http.StatusBadGateway)
