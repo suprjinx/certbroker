@@ -1,9 +1,6 @@
 package authz
 
-import (
-	"context"
-	"log/slog"
-)
+import "context"
 
 // Pipeline is the production Authorizer: identity → reenroll-must-auth →
 // inventory → challenge → role → constraints. Any gap denies (fail closed).
@@ -13,11 +10,11 @@ type Pipeline struct {
 	Roles            RoleSelector       // required
 	Constraints      ConstraintBuilder  // required
 	RequireChallenge bool               // global: force challenge validation
-	Logger           *slog.Logger
 }
 
 // Authorize implements Authorizer.
 func (p *Pipeline) Authorize(ctx context.Context, req Request) (Decision, error) {
+	// (1) Identity: authenticated cert attributes vs what the CSR requests.
 	id := resolveIdentity(req)
 
 	// (2) Re-enrollment continuity requires an authenticated client cert.

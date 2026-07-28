@@ -2,6 +2,7 @@ package est
 
 import (
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -12,13 +13,33 @@ import (
 // ttlSlack absorbs OpenBao's NotBefore backdating plus clock skew.
 const ttlSlack = time.Hour
 
-// verifyIssued checks the issued cert against what was approved, catching roles
-// whose use_csr_* defaults re-add the CSR's names. Empty = unchecked.
+// verifyIssued checks the issued cert against what was approved. Names are
+// all-or-nothing (see namesConstrained); the TTL cap applies regardless.
 func verifyIssued(cert *x509.Certificate, c authz.CertConstraints) error {
 	if cert == nil {
-		return fmt.Errorf("no certificate to verify")
+		return errors.New("no certificate to verify")
 	}
 
+	if namesConstrained(c) {
+		if err := verifyNames(cert, c); err != nil {
+			return err
+		}
+	}
+
+	if c.TTL > 0 {
+		if lifetime := cert.NotAfter.Sub(cert.NotBefore); lifetime > c.TTL+ttlSlack {
+			return fmt.Errorf("issued cert lifetime %v exceeds the authorized TTL %v", lifetime, c.TTL)
+		}
+	}
+	return nil
+}
+
+// namesConstrained reports whether the decision bounded the subject at all.
+func namesConstrained(c authz.CertConstraints) bool {
+	return c.CommonName != "" || len(c.DNSNames) > 0 || len(c.IPs) > 0 || len(c.URIs) > 0
+}
+
+func verifyNames(cert *x509.Certificate, c authz.CertConstraints) error {
 	// Case-insensitive like the SANs: a CN carrying a hostname is a DNS name, and
 	// a CA that normalizes its case has not issued a different name.
 	if c.CommonName != "" && !equalFoldASCII(cert.Subject.CommonName, c.CommonName) {
@@ -31,44 +52,22 @@ func verifyIssued(cert *x509.Certificate, c authz.CertConstraints) error {
 	if c.CommonName != "" && !c.ExcludeCNFromSANs {
 		permittedDNS = append(append([]string{}, c.DNSNames...), c.CommonName)
 	}
-	if len(permittedDNS) > 0 {
-		for _, name := range cert.DNSNames {
-			if !containsFold(permittedDNS, name) {
-				return fmt.Errorf("issued cert carries unauthorized DNS SAN %q (authorized: %v)",
-					name, permittedDNS)
-			}
-		}
-	} else if len(cert.DNSNames) > 0 && c.CommonName != "" {
-		// Policy pinned a CN and authorized no SANs, yet SANs came back.
-		return fmt.Errorf("issued cert carries DNS SANs %v but none were authorized", cert.DNSNames)
-	}
-
-	if len(c.IPs) > 0 {
-		for _, ip := range cert.IPAddresses {
-			if !containsIP(c.IPs, ip) {
-				return fmt.Errorf("issued cert carries unauthorized IP SAN %q", ip)
-			}
-		}
-	} else if len(cert.IPAddresses) > 0 {
-		return fmt.Errorf("issued cert carries IP SANs %v but none were authorized", cert.IPAddresses)
-	}
-
-	if len(c.URIs) > 0 {
-		for _, u := range cert.URIs {
-			if !containsFold(c.URIs, u.String()) {
-				return fmt.Errorf("issued cert carries unauthorized URI SAN %q", u)
-			}
-		}
-	} else if len(cert.URIs) > 0 {
-		return fmt.Errorf("issued cert carries URI SANs %v but none were authorized", cert.URIs)
-	}
-
-	if c.TTL > 0 {
-		if lifetime := cert.NotAfter.Sub(cert.NotBefore); lifetime > c.TTL+ttlSlack {
-			return fmt.Errorf("issued cert lifetime %v exceeds the authorized TTL %v", lifetime, c.TTL)
+	for _, name := range cert.DNSNames {
+		if !containsFold(permittedDNS, name) {
+			return fmt.Errorf("issued cert carries unauthorized DNS SAN %q (authorized: %v)",
+				name, permittedDNS)
 		}
 	}
-
+	for _, ip := range cert.IPAddresses {
+		if !containsIP(c.IPs, ip) {
+			return fmt.Errorf("issued cert carries unauthorized IP SAN %q (authorized: %v)", ip, c.IPs)
+		}
+	}
+	for _, u := range cert.URIs {
+		if !containsFold(c.URIs, u.String()) {
+			return fmt.Errorf("issued cert carries unauthorized URI SAN %q (authorized: %v)", u, c.URIs)
+		}
+	}
 	return nil
 }
 

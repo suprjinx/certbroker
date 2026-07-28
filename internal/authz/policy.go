@@ -42,6 +42,19 @@ func NewStandardConstraints(mode string, maxValidity time.Duration) *StandardCon
 
 // Build implements ConstraintBuilder.
 func (b *StandardConstraints) Build(id Identity, rec Record) (CertConstraints, error) {
+	c, err := b.build(id, rec)
+	if err != nil {
+		return CertConstraints{}, err
+	}
+	// Reachable from a CSR with neither CN nor SANs, whose emptiness satisfies
+	// every check vacuously — leaving the subject entirely to the role.
+	if c.CommonName == "" && len(c.DNSNames) == 0 && len(c.IPs) == 0 && len(c.URIs) == 0 {
+		return CertConstraints{}, fmt.Errorf("request names no subject")
+	}
+	return c, nil
+}
+
+func (b *StandardConstraints) build(id Identity, rec Record) (CertConstraints, error) {
 	c := CertConstraints{TTL: b.MaxValidity}
 
 	switch b.Mode {

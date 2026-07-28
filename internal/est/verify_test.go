@@ -216,3 +216,31 @@ func genLeafWithURIs(t *testing.T, cn string, uris []*url.URL) (string, []byte, 
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
 	return certPEM, der, keyPEM, keyDER
 }
+
+// TestVerifyIssuedNameTypesAreAllOrNothing: once a decision names any subject,
+// a type it left empty permits none — unnamed is not unchecked.
+func TestVerifyIssuedNameTypesAreAllOrNothing(t *testing.T) {
+	_, der, _, _ := genLeafWithSANs(t, "", []string{"snuck.example.com"})
+	cert := parseDER(t, der)
+
+	// Only IPs were authorized, so a DNS SAN is unauthorized — previously this
+	// slipped through because the DNS branch keyed off CommonName being set.
+	err := verifyIssued(cert, authz.CertConstraints{IPs: []string{"192.0.2.1"}})
+	if err == nil {
+		t.Fatal("expected a DNS SAN to be rejected when only IPs were authorized")
+	}
+	if !strings.Contains(err.Error(), "snuck.example.com") {
+		t.Fatalf("error should name the offending SAN: %v", err)
+	}
+}
+
+// TestVerifyIssuedTTLCheckedEvenWhenUnnamed keeps the TTL cap independent of the
+// name checks, so deferring the subject to the role does not defer the lifetime.
+func TestVerifyIssuedTTLCheckedEvenWhenUnnamed(t *testing.T) {
+	_, der, _, _ := genLeafWithSANs(t, "whatever.example.com", nil) // 24h
+	cert := parseDER(t, der)
+
+	if err := verifyIssued(cert, authz.CertConstraints{TTL: time.Minute}); err == nil {
+		t.Fatal("expected the TTL cap to apply to an otherwise unconstrained decision")
+	}
+}

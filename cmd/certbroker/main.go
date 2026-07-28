@@ -225,7 +225,6 @@ func selectAuthorizer(logger *slog.Logger, cfg *config.Config, devAllowAll bool,
 		Roles:            authz.NewRuleSelector(rules, cfg.RoleMap.Default),
 		Constraints:      authz.NewStandardConstraints(cfg.Policy.SANConstraint, cfg.Policy.MaxValidity.Std()),
 		RequireChallenge: cfg.Policy.RequireCPP,
-		Logger:           logger,
 	}, nil
 }
 

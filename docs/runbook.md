@@ -1,7 +1,6 @@
 # certbroker runbook
 
-Operating guide for the EST enrollment broker. For architecture and roadmap see
-[`PLAN.md`](../PLAN.md); for the adversary model see
+Operating guide for the EST enrollment broker. For the adversary model see
 [`docs/threat-model.md`](threat-model.md).
 
 ---

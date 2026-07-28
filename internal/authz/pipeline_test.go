@@ -310,3 +310,28 @@ func TestNoChallengeDoesNotSatisfyARequiredChallenge(t *testing.T) {
 type staticInventory struct{ rec Record }
 
 func (s *staticInventory) Lookup(context.Context, Identity) (Record, error) { return s.rec, nil }
+
+// TestCSRNamingNothingIsDenied: a CSR with neither CN nor SANs passes every
+// name check vacuously, so without a guard it authorizes nothing-constrained.
+func TestCSRNamingNothingIsDenied(t *testing.T) {
+	for _, mode := range []string{SANModeIdentity, SANModeAllowlist, SANModeCSR} {
+		t.Run(mode, func(t *testing.T) {
+			inv := &staticInventory{rec: Record{
+				Found:           true,
+				AllowedDNSNames: []string{"*.example.com"},
+			}}
+			p := basePipeline(inv, nil, false, mode)
+
+			d, err := p.Authorize(context.Background(), Request{
+				Operation: OpSimpleEnroll,
+				CSR:       csrFor("", nil), // no CN, no SANs
+			})
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if d.Allow {
+				t.Fatalf("a CSR naming nothing must be denied; got constraints %+v", d.Constraints)
+			}
+		})
+	}
+}

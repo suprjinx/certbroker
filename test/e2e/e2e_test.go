@@ -141,7 +141,6 @@ func newHarness(t *testing.T, inventoryYAML string, role string) *harness {
 		Challenge:   authz.NoChallenge{},
 		Roles:       authz.NewRuleSelector(nil, role),
 		Constraints: authz.NewStandardConstraints(authz.SANModeIdentity, 720*time.Hour),
-		Logger:      logger,
 	}
 
 	handler, err := est.NewHandler(est.Options{
@@ -475,7 +474,6 @@ func newHarnessOnRole(t *testing.T, base *harness, inventoryYAML, role string) *
 			Challenge:   authz.NoChallenge{},
 			Roles:       authz.NewRuleSelector(nil, role),
 			Constraints: authz.NewStandardConstraints(authz.SANModeIdentity, 720*time.Hour),
-			Logger:      logger,
 		},
 		Logger: logger,
 	})

@@ -5,6 +5,7 @@ package pkcs7
 import (
 	"encoding/asn1"
 	"errors"
+	"fmt"
 )
 
 var (
@@ -47,7 +48,7 @@ func DegenerateCertsOnly(certDER ...[]byte) ([]byte, error) {
 	var certBytes []byte
 	for i, d := range certDER {
 		if len(d) == 0 {
-			return nil, errors.New("pkcs7: empty certificate at index " + itoa(i))
+			return nil, fmt.Errorf("pkcs7: empty certificate at index %d", i)
 		}
 		certBytes = append(certBytes, d...)
 	}
@@ -88,19 +89,4 @@ func DegenerateCertsOnly(certDER ...[]byte) ([]byte, error) {
 		},
 	}
 	return asn1.Marshal(outer)
-}
-
-// itoa is a tiny int-to-string to avoid pulling in strconv for one error path.
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b [20]byte
-	pos := len(b)
-	for i > 0 {
-		pos--
-		b[pos] = byte('0' + i%10)
-		i /= 10
-	}
-	return string(b[pos:])
 }

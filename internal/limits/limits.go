@@ -7,7 +7,6 @@ import (
 	"math"
 	"net"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -27,6 +26,9 @@ const (
 // sweepBudget keeps eviction O(1) per insert. Go randomizes map iteration, so a
 // bounded scan doubles as a random sample.
 const sweepBudget = 256
+
+// retryAfterSeconds is the Retry-After sent with 429 and 503.
+const retryAfterSeconds = "1"
 
 // Config configures a Limiter. Zero-valued fields take the package defaults;
 // a negative rate or burst disables that limiter entirely.
@@ -199,7 +201,6 @@ type Limiter struct {
 	sem            chan struct{}
 	acquireTimeout time.Duration
 	logger         *slog.Logger
-	now            func() time.Time
 }
 
 // New builds a Limiter from cfg.
@@ -211,7 +212,6 @@ func New(cfg Config) *Limiter {
 		global:         newKeyedLimiter(cfg.GlobalRate, cfg.GlobalBurst, 1, cfg.now),
 		acquireTimeout: cfg.AcquireTimeout,
 		logger:         cfg.Logger,
-		now:            cfg.now,
 	}
 	if cfg.MaxConcurrent > 0 {
 		l.sem = make(chan struct{}, cfg.MaxConcurrent)
@@ -238,7 +238,7 @@ func (l *Limiter) Middleware(next http.Handler) http.Handler {
 		if !ok {
 			l.logger.Warn("request shed: no concurrency slot",
 				"remote", client, "path", r.URL.Path)
-			w.Header().Set("Retry-After", "1")
+			w.Header().Set("Retry-After", retryAfterSeconds)
 			http.Error(w, "server busy", http.StatusServiceUnavailable)
 			return
 		}
@@ -275,7 +275,7 @@ func (l *Limiter) acquire(r *http.Request) (func(), bool) {
 
 func (l *Limiter) reject(w http.ResponseWriter, r *http.Request, client, reason string) {
 	l.logger.Warn("request rate limited", "remote", client, "path", r.URL.Path, "reason", reason)
-	w.Header().Set("Retry-After", strconv.Itoa(1))
+	w.Header().Set("Retry-After", retryAfterSeconds)
 	http.Error(w, "rate limit exceeded", http.StatusTooManyRequests)
 }
 

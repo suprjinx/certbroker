@@ -201,7 +201,8 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// Default returns a config with safe defaults filled in.
+// Default returns the values the binary actually runs with. internal/limits and
+// internal/est keep separate defaults for standalone use; the two do not track.
 func Default() *Config {
 	return &Config{
 		Server: Server{

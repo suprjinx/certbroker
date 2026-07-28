@@ -129,8 +129,10 @@ the failure was silent.
 
 **Residual.** The certificate is *already issued* when the check fires; only its
 delivery is prevented. The serial is logged so it can be revoked, but revocation
-is manual (§7, G2). A constraint the broker leaves empty is not checked, because
-an empty constraint legitimately means "the role decides".
+is manual (§7, G2). Name checking is all-or-nothing: once a decision names any
+subject, a name type it left empty permits none of that type, and only a wholly
+empty decision — policy deliberately deferring to the role — skips the name
+checks entirely. The TTL cap applies either way.
 
 ### T3 — Bootstrap credential replay (A2)
 
@@ -319,12 +321,13 @@ management interface; do not expose it beside `:8443`.
 | G8 | A broad inventory glob (`cn: "*"`) silently disables the gate | Inventory stops being an authorization control | Accepted; documented |
 | G9 | Empty-CN client certificates | Constraints pin an empty CN, so the CN check is skipped | Open; low impact |
 | G10 | No CT logging or issuance reconciliation | Mis-issuance is detected only at the moment it happens | Accepted for now |
+| G11 | OpenBao retries are not idempotency-aware | A network error after signing makes the retry issue a second certificate — constrained, but absent from the audit log | Open; fixing it means dropping retries on POST or tracking issuance out of band |
 
 ---
 
 ## 8. SCEP (Phase 5) — surface not yet present
 
-Recorded here so the model is not silently outgrown. See `PLAN.md` Phase 5.
+Recorded here so the model is not silently outgrown when SCEP lands.
 
 - **The broker gains a private key.** SCEP requires an RA keypair to decrypt
   requests and sign responses. "No CA key on the broker" remains true, but "no

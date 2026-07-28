@@ -196,17 +196,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return c.doRaw(ctx, method, path, body, tok, out)
 }
 
-// doRaw performs one request with retry/backoff on transient failures. An empty
-// token is allowed (login); a nil out discards the body.
-func (c *Client) doRaw(ctx context.Context, method, path string, body any, token string, out any) error {
-	var payload []byte
-	if body != nil {
-		var err error
-		if payload, err = json.Marshal(body); err != nil {
-			return fmt.Errorf("bao: marshal request: %w", err)
-		}
-	}
+// maxResponseBytes bounds an OpenBao response body. Cert bundles and CA chains
+// are kilobytes; this stops a misbehaving upstream exhausting broker memory.
+const maxResponseBytes = 8 << 20
 
+// doRequest retries network errors and 5xx with backoff; 4xx returns at once.
+// NOT idempotency-aware: a retry after a lost response issues a second cert.
+func (c *Client) doRequest(ctx context.Context, method, path string, payload []byte, token string) ([]byte, error) {
 	url := strings.TrimRight(c.cfg.Address, "/") + "/" + strings.TrimLeft(path, "/")
 
 	var lastErr error
@@ -214,7 +210,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body any, token
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return ctx.Err()
+				return nil, ctx.Err()
 			case <-time.After(backoff(attempt)):
 			}
 		}
@@ -225,7 +221,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body any, token
 		}
 		req, err := http.NewRequestWithContext(ctx, method, url, rdr)
 		if err != nil {
-			return fmt.Errorf("bao: build request: %w", err)
+			return nil, fmt.Errorf("bao: build request: %w", err)
 		}
 		if payload != nil {
 			req.Header.Set("Content-Type", "application/json")
@@ -240,29 +236,49 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body any, token
 			continue // network error: retry
 		}
 
-		respBody, err := io.ReadAll(resp.Body)
+		respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 		resp.Body.Close()
 		if err != nil {
 			lastErr = fmt.Errorf("bao: read response: %w", err)
 			continue
 		}
+		if len(respBody) > maxResponseBytes {
+			return nil, fmt.Errorf("bao: %s %s: response exceeds %d bytes", method, path, maxResponseBytes)
+		}
 
-		if resp.StatusCode >= 500 {
+		switch {
+		case resp.StatusCode >= 500:
 			lastErr = apiError(method, path, resp.StatusCode, respBody)
 			continue // server error: retry
+		case resp.StatusCode >= 400:
+			return nil, apiError(method, path, resp.StatusCode, respBody)
 		}
-		if resp.StatusCode >= 400 {
-			return apiError(method, path, resp.StatusCode, respBody) // client error: do not retry
-		}
-
-		if out != nil && len(respBody) > 0 {
-			if err := json.Unmarshal(respBody, out); err != nil {
-				return fmt.Errorf("bao: decode response: %w", err)
-			}
-		}
-		return nil
+		return respBody, nil
 	}
-	return lastErr
+	return nil, lastErr
+}
+
+// doRaw performs a request and decodes the JSON body into out (which may be
+// nil). An empty token is allowed, for login.
+func (c *Client) doRaw(ctx context.Context, method, path string, body any, token string, out any) error {
+	var payload []byte
+	if body != nil {
+		var err error
+		if payload, err = json.Marshal(body); err != nil {
+			return fmt.Errorf("bao: marshal request: %w", err)
+		}
+	}
+
+	respBody, err := c.doRequest(ctx, method, path, payload, token)
+	if err != nil {
+		return err
+	}
+	if out != nil && len(respBody) > 0 {
+		if err := json.Unmarshal(respBody, out); err != nil {
+			return fmt.Errorf("bao: decode response: %w", err)
+		}
+	}
+	return nil
 }
 
 // doRawBytes returns the raw body, for endpoints like ca_chain that emit PEM.
@@ -271,45 +287,7 @@ func (c *Client) doRawBytes(ctx context.Context, method, path string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
-	url := strings.TrimRight(c.cfg.Address, "/") + "/" + strings.TrimLeft(path, "/")
-
-	var lastErr error
-	for attempt := 0; attempt <= c.cfg.MaxRetries; attempt++ {
-		if attempt > 0 {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff(attempt)):
-			}
-		}
-		req, err := http.NewRequestWithContext(ctx, method, url, nil)
-		if err != nil {
-			return nil, fmt.Errorf("bao: build request: %w", err)
-		}
-		if tok != "" {
-			req.Header.Set("X-Vault-Token", tok)
-		}
-		resp, err := c.hc.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("bao: %s %s: %w", method, path, err)
-			continue
-		}
-		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			lastErr = fmt.Errorf("bao: read response: %w", err)
-			continue
-		}
-		if resp.StatusCode >= 500 {
-			lastErr = apiError(method, path, resp.StatusCode, respBody)
-			continue
-		}
-		if resp.StatusCode >= 400 {
-			return nil, apiError(method, path, resp.StatusCode, respBody)
-		}
-		return respBody, nil
-	}
-	return nil, lastErr
+	return c.doRequest(ctx, method, path, nil, tok)
 }
 
 // leaseExpiry converts lease seconds to an absolute expiry; non-positive (root
