@@ -1,17 +1,5 @@
-// Package limits provides the denial-of-service controls that sit in front of
-// the enrollment handlers: per-client and global request rate limiting, and a
-// bound on the number of requests performing expensive cryptography at once.
-//
-// Enrollment is an unusually attractive DoS target. Every /simpleenroll POST
-// makes the broker parse attacker-supplied ASN.1 and verify a signature before
-// any authorization decision is possible — the proof-of-possession check is by
-// definition unauthenticated work. These limits bound that work; they do not
-// replace authorization.
-//
-// Client identity for rate-limiting purposes is the TCP source address, never
-// a forwarded header. The deployment model is an L4 passthrough proxy, which
-// preserves the real source IP; trusting X-Forwarded-For would instead let any
-// client pick its own rate-limit bucket and escape the limit entirely.
+// Package limits bounds the unauthenticated work an enrollment request can
+// force: per-client and global rate limits, plus a concurrency cap.
 package limits
 
 import (
@@ -24,9 +12,8 @@ import (
 	"time"
 )
 
-// Defaults sized for an enrollment broker: devices enroll rarely (once at
-// bootstrap, then on renewal), so sustained rates are low and bursts are what
-// matter — a rebooting fleet retries in clusters.
+// Defaults sized for an enrollment broker: devices enroll rarely, so sustained
+// rates are low and bursts are what matter (a rebooting fleet retries at once).
 const (
 	DefaultPerClientRate  = 1.0
 	DefaultPerClientBurst = 5.0
@@ -37,10 +24,8 @@ const (
 	DefaultMaxClients     = 65536
 )
 
-// sweepBudget bounds the work done to reclaim space in the client table, so
-// eviction stays O(1) per insert even when the table is full of active
-// attackers. Go randomizes map iteration order, so a bounded scan is also a
-// random sample.
+// sweepBudget keeps eviction O(1) per insert. Go randomizes map iteration, so a
+// bounded scan doubles as a random sample.
 const sweepBudget = 256
 
 // Config configures a Limiter. Zero-valued fields take the package defaults;
@@ -172,9 +157,8 @@ func (k *keyedLimiter) allow(key string) bool {
 	return b.take(now, k.rate, k.burst)
 }
 
-// evictLocked frees at least one slot in the table with a single bounded pass:
-// idle buckets are dropped outright, and if the sample contained none, the
-// least-recently-used entry seen is evicted.
+// evictLocked frees a slot in one bounded pass: idle buckets are dropped, and if
+// the sample held none, the least-recently-used entry seen is evicted.
 func (k *keyedLimiter) evictLocked(now time.Time) {
 	var (
 		freed     int
@@ -235,11 +219,8 @@ func New(cfg Config) *Limiter {
 	return l
 }
 
-// Middleware wraps next with the configured limits.
-//
-// Checks run cheapest-first and per-client before global, so that a flood from
-// one source is rejected against its own budget rather than draining the
-// listener-wide allowance and locking out well-behaved devices.
+// Middleware wraps next with the configured limits. Per-client runs before
+// global so one flood is rejected against its own budget, not everyone's.
 func (l *Limiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		client := ClientIP(r)
@@ -301,11 +282,8 @@ func (l *Limiter) reject(w http.ResponseWriter, r *http.Request, client, reason 
 // TrackedClients reports how many source addresses currently hold buckets.
 func (l *Limiter) TrackedClients() int { return l.perClient.size() }
 
-// ClientIP extracts the peer address from a request for rate-limiting purposes.
-//
-// It deliberately uses only r.RemoteAddr. Forwarded headers are client-supplied
-// and would let a caller rotate its own limiter key at will; the L4 passthrough
-// deployment preserves the true source address here.
+// ClientIP is the rate-limit key. Deliberately r.RemoteAddr only: forwarded
+// headers are client-supplied and would let a caller rotate its own key.
 func ClientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

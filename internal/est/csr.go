@@ -14,30 +14,21 @@ import (
 // oidChallengePassword is the PKCS#9 challengePassword attribute (1.2.840.113549.1.9.7).
 var oidChallengePassword = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 9, 7}
 
-// RSA modulus bounds applied to every CSR before its signature is verified.
-// The floor rejects keys too weak to be worth issuing against; the ceiling
-// bounds the cost of the proof-of-possession check, which the broker performs
-// on unauthenticated input.
+// RSA modulus bounds applied before signature verification: the floor rejects
+// weak keys, the ceiling caps the cost of PoP on unauthenticated input.
 const (
 	DefaultMinRSABits = 2048
 	DefaultMaxRSABits = 8192
 )
 
-// ParseCSR decodes a DER PKCS#10 request and verifies its self-signature, which
-// is the proof-of-possession that the requester holds the private key. Go's
-// x509.ParseCertificateRequest does NOT check the signature, so we do it here.
-// Default RSA bounds apply.
+// ParseCSR decodes a DER PKCS#10 and verifies its self-signature (proof of
+// possession), which x509.ParseCertificateRequest does not do. Default bounds.
 func ParseCSR(der []byte) (*x509.CertificateRequest, error) {
 	return ParseCSRLimited(der, DefaultMinRSABits, DefaultMaxRSABits)
 }
 
-// ParseCSRLimited is ParseCSR with explicit RSA modulus bounds. Non-positive
-// bounds fall back to the defaults.
-//
-// Key size is checked BEFORE the signature. Verification cost scales with the
-// modulus, and at this point in the request the caller is entirely
-// unauthenticated, so an oversized key must be rejected on the cheap path
-// rather than after doing the expensive work.
+// ParseCSRLimited is ParseCSR with explicit bounds (non-positive = defaults).
+// Key size is checked BEFORE the signature, which is unauthenticated work.
 func ParseCSRLimited(der []byte, minRSABits, maxRSABits int) (*x509.CertificateRequest, error) {
 	csr, err := x509.ParseCertificateRequest(der)
 	if err != nil {
@@ -52,8 +43,7 @@ func ParseCSRLimited(der []byte, minRSABits, maxRSABits int) (*x509.CertificateR
 	return csr, nil
 }
 
-// checkRSABounds enforces the modulus size limits on RSA keys. Other key types
-// have fixed, small verification costs and pass through.
+// checkRSABounds limits RSA moduli; other key types have fixed small costs.
 func checkRSABounds(pub any, minBits, maxBits int) error {
 	rsaPub, ok := pub.(*rsa.PublicKey)
 	if !ok {
@@ -99,9 +89,7 @@ func KeyType(csr *x509.CertificateRequest) (string, error) {
 }
 
 // ValidateKeyType checks the CSR's key against an allowlist of normalized
-// tokens. An empty allowlist permits any recognized key type (the Phase 3
-// policy engine tightens this per identity). Unrecognized key types are always
-// rejected.
+// tokens. Empty allows any recognized type; unrecognized is always rejected.
 func ValidateKeyType(csr *x509.CertificateRequest, allowed []string) error {
 	kt, err := KeyType(csr)
 	if err != nil {
@@ -132,9 +120,8 @@ type csrAttribute struct {
 	Values asn1.RawValue `asn1:"set"`
 }
 
-// ChallengePassword extracts the PKCS#9 challengePassword attribute from a CSR,
-// returning "" when absent. Go's high-level CertificateRequest drops CSR
-// attributes, so we re-parse the raw CertificationRequestInfo.
+// ChallengePassword extracts the PKCS#9 challengePassword, "" when absent. Go
+// drops CSR attributes, so this re-parses the raw CertificationRequestInfo.
 func ChallengePassword(csr *x509.CertificateRequest) (string, error) {
 	if len(csr.RawTBSCertificateRequest) == 0 {
 		return "", nil

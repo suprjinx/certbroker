@@ -5,18 +5,8 @@ import (
 	"log/slog"
 )
 
-// Pipeline is the production Authorizer. It runs a fixed sequence of stages,
-// every one of which must pass, and fails closed: any missing component,
-// uncertain result, or error denies issuance.
-//
-// Stages, in order:
-//  1. Identity resolution (mTLS cert + CSR).
-//  2. Re-enrollment must be authenticated by a client certificate.
-//  3. Inventory: the device must be permitted (unless NoInventory).
-//  4. Challenge: validate the challengePassword when required (globally, or by
-//     the inventory record, or whenever one is supplied).
-//  5. Role selection: identity → OpenBao role (record override wins).
-//  6. Constraint policy: derive the bounded CN/SANs/TTL actually requested.
+// Pipeline is the production Authorizer: identity → reenroll-must-auth →
+// inventory → challenge → role → constraints. Any gap denies (fail closed).
 type Pipeline struct {
 	Inventory        Inventory          // nil ⇒ NoInventory (all devices permitted)
 	Challenge        ChallengeValidator // nil ⇒ no validator (required challenges deny)

@@ -9,42 +9,24 @@ import (
 	"github.com/gr-oss/certbroker/internal/authz"
 )
 
-// ttlSlack absorbs the backdating OpenBao applies to NotBefore (30s by default)
-// plus clock skew, so a correctly-issued certificate is not flagged.
+// ttlSlack absorbs OpenBao's NotBefore backdating plus clock skew.
 const ttlSlack = time.Hour
 
-// verifyIssued checks that the certificate OpenBao returned stays within the
-// constraints the authorizer approved.
-//
-// This is not paranoia about OpenBao; it closes a real gap. OpenBao's PKI roles
-// default to use_csr_sans=true and use_csr_common_name=true, which make the
-// CSR's own subject and SANs *merge with* the parameters the broker sends
-// rather than being replaced by them. Under such a role a device authorized for
-// one name can obtain any additional name the role's allowed_domains permits,
-// simply by putting it in the CSR — silently defeating the constraint policy.
-//
-// Roles are externally managed and opaque to the broker (it cannot read or fix
-// them), so the broker verifies the result instead. A violation means the role
-// is misconfigured: it must be reported loudly, and the certificate must not be
-// handed to the client.
-//
-// Constraints left empty mean policy chose not to bound that field and the
-// role's own configuration applies; those fields are not checked.
+// verifyIssued checks the issued cert against what was approved, catching roles
+// whose use_csr_* defaults re-add the CSR's names. Empty = unchecked.
 func verifyIssued(cert *x509.Certificate, c authz.CertConstraints) error {
 	if cert == nil {
 		return fmt.Errorf("no certificate to verify")
 	}
 
-	// Compared case-insensitively, like the SANs: a CN carrying a hostname is a
-	// DNS name, and a CA that normalizes its case has not issued a different
-	// name. Exact comparison here would reject correct certificates.
+	// Case-insensitive like the SANs: a CN carrying a hostname is a DNS name, and
+	// a CA that normalizes its case has not issued a different name.
 	if c.CommonName != "" && !equalFoldASCII(cert.Subject.CommonName, c.CommonName) {
 		return fmt.Errorf("issued CN %q does not match the authorized CN %q",
 			cert.Subject.CommonName, c.CommonName)
 	}
 
-	// The CN is legitimately mirrored into the SANs unless the broker asked for
-	// it to be excluded, so it joins the permitted set.
+	// OpenBao mirrors the CN into the SANs unless told not to, so it is permitted.
 	permittedDNS := c.DNSNames
 	if c.CommonName != "" && !c.ExcludeCNFromSANs {
 		permittedDNS = append(append([]string{}, c.DNSNames...), c.CommonName)
@@ -90,8 +72,8 @@ func verifyIssued(cert *x509.Certificate, c authz.CertConstraints) error {
 	return nil
 }
 
-// containsFold reports whether want is in list, case-insensitively. DNS names
-// are case-insensitive, and a case-flipped name would otherwise slip through.
+// containsFold reports whether want is in list, case-insensitively, so a
+// case-flipped name does not slip through.
 func containsFold(list []string, want string) bool {
 	for _, v := range list {
 		if equalFoldASCII(v, want) {
@@ -101,8 +83,8 @@ func containsFold(list []string, want string) bool {
 	return false
 }
 
-// equalFoldASCII is strings.EqualFold restricted to ASCII, which is all DNS
-// names and URI schemes need and avoids Unicode case-folding surprises.
+// equalFoldASCII is strings.EqualFold restricted to ASCII — enough for DNS
+// names and URI schemes, without Unicode case-folding surprises.
 func equalFoldASCII(a, b string) bool {
 	if len(a) != len(b) {
 		return false

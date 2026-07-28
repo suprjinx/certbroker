@@ -8,18 +8,8 @@ type RoleSelector interface {
 	Role(id Identity) string
 }
 
-// Rule maps a selector to a role. Selectors have the form "key:pattern", where
-// key is one of:
-//
-//	cn     — authenticated cert CN (falls back to requested CN if unauthenticated)
-//	ou     — any authenticated cert OU
-//	o      — any authenticated cert O
-//	san    — any requested CSR dNSName
-//	label  — the EST URI label
-//	serial — authenticated cert serial (lowercase hex)
-//	*      — matches any identity
-//
-// pattern supports the wildcard forms of globMatch ("*", "*.suffix", exact).
+// Rule maps a "key:pattern" selector (cn, ou, o, san, label, serial, "*") to a
+// role. SECURITY: cn/san read the CSR at bootstrap — see threat-model.md T5.
 type Rule struct {
 	Match string
 	Role  string

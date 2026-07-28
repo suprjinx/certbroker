@@ -1,14 +1,5 @@
-// Package authz defines the authorization seam between the enrollment
-// protocols (EST, later SCEP) and the policy engine that decides whether a
-// device may receive the certificate it is asking for.
-//
-// The protocol handlers never call OpenBao with attributes taken straight from
-// a CSR. Instead they build a Request, ask an Authorizer for a Decision, and
-// pass the Decision's role + constrained parameters to the issuer. This is the
-// single chokepoint where "is this device permitted to have this cert?" is
-// answered. The real pipeline (mTLS identity mapping, challenge-password
-// validation, inventory lookup, CSR constraint policy) is built in Phase 3;
-// this file provides the contract and two trivial placeholders.
+// Package authz is the single chokepoint answering "may this device have this
+// cert?". Handlers pass a Request, never CSR attributes, to the issuer.
 package authz
 
 import (
@@ -27,30 +18,25 @@ const (
 	OpServerKeyGen   Operation = "serverkeygen"
 )
 
-// Request is everything the authorizer needs to make a decision. Fields are
-// populated by the protocol handler from the authenticated transport and the
-// parsed CSR.
+// Request is everything the authorizer needs, populated by the protocol handler
+// from the authenticated transport and the parsed CSR.
 type Request struct {
 	Operation Operation
-	// ClientCert is the verified mTLS client certificate, or nil if the client
-	// presented none. For re-enroll it is the existing device certificate
-	// (already verified against the device trust anchor by the handler).
+	// ClientCert is the verified mTLS client certificate, or nil if none was
+	// presented. Set only after the handler verifies it against a trust anchor.
 	ClientCert *x509.Certificate
 	// CSR is the parsed, signature-verified certificate request.
 	CSR *x509.CertificateRequest
 	// ChallengePassword is the PKCS#9 challengePassword from the CSR, if present.
 	ChallengePassword string
-	// Label is the optional EST URI label (/.well-known/est/{label}/...), which
-	// a future policy may use to select a role or tenant.
+	// Label is the optional EST URI label (/.well-known/est/{label}/...).
 	Label string
 	// RemoteAddr is the client's network address, for audit/rate context.
 	RemoteAddr string
 }
 
-// CertConstraints are the parameters the broker will actually request from
-// OpenBao, derived and bounded by policy rather than copied blindly from the
-// CSR. Empty slice/zero fields mean "do not send this parameter" (the OpenBao
-// role's own configuration then applies).
+// CertConstraints are what the broker actually requests from OpenBao, bounded by
+// policy rather than copied from the CSR. Zero fields = omit, role decides.
 type CertConstraints struct {
 	CommonName        string
 	DNSNames          []string
@@ -73,8 +59,7 @@ type Decision struct {
 func Deny(reason string) Decision { return Decision{Allow: false, Reason: reason} }
 
 // Authorizer decides whether a request may be fulfilled and under what
-// constraints. Implementations must be safe for concurrent use and must fail
-// closed (return Allow=false, or a non-nil error) on any uncertainty.
+// constraints. Must be concurrency-safe and fail closed on any uncertainty.
 type Authorizer interface {
 	Authorize(ctx context.Context, req Request) (Decision, error)
 }
@@ -87,13 +72,8 @@ func (DenyAll) Authorize(context.Context, Request) (Decision, error) {
 	return Deny("no authorizer configured"), nil
 }
 
-// AllowAllEcho authorizes every request and echoes the CSR's own subject/SANs
-// back as the constraints, issuing under a fixed role.
-//
-// SECURITY: this performs NO authorization and MUST NOT be used in production.
-// It exists only for local development and handler tests until the Phase 3
-// policy pipeline replaces it. Guard its selection behind an explicit,
-// loudly-logged dev flag in the wiring layer.
+// AllowAllEcho authorizes everything, echoing the CSR's own subject/SANs back.
+// SECURITY: no authorization whatsoever — dev and tests only.
 type AllowAllEcho struct {
 	Role string
 }

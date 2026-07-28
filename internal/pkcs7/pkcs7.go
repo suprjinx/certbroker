@@ -1,11 +1,5 @@
-// Package pkcs7 produces the small subset of PKCS#7 / CMS that the EST protocol
-// requires: a "certs-only" (degenerate) SignedData carrying one or more
-// certificates and no signers. This is what EST returns for /cacerts and for
-// successful enrollment responses (RFC 7030 §4.1.3, §4.2.3).
-//
-// Only encoding is implemented; the broker never needs to parse PKCS#7 for EST.
-// Keeping this in-tree avoids a third-party CMS dependency in a security-
-// sensitive path.
+// Package pkcs7 encodes the certs-only (degenerate) SignedData that EST returns
+// for /cacerts and enrollment. Encode only — no parsing, no CMS dependency.
 package pkcs7
 
 import (
@@ -20,17 +14,15 @@ var (
 	oidData = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 7, 1}
 )
 
-// contentInfo is the outer PKCS#7 ContentInfo wrapper. Content is a self-tagged
-// RawValue (context [0] explicit) rather than a struct-tagged field, because
-// asn1.Marshal emits a RawValue verbatim and would otherwise skip the tag.
+// contentInfo is the outer wrapper. Content is a self-tagged RawValue because
+// asn1.Marshal emits RawValues verbatim and would skip a struct tag.
 type contentInfo struct {
 	ContentType asn1.ObjectIdentifier
 	Content     asn1.RawValue
 }
 
-// signedData is the certs-only SignedData: empty digestAlgorithms, an
-// encapsulated ContentInfo of type data with no content, the certificate set,
-// and empty signerInfos. Each RawValue carries its own tag/class.
+// signedData is the certs-only form: no digest algorithms, no content, no
+// signers. Each RawValue carries its own tag/class.
 type signedData struct {
 	Version          int
 	DigestAlgorithms asn1.RawValue // empty SET
@@ -44,16 +36,14 @@ func emptySet() asn1.RawValue {
 	return asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagSet, IsCompound: true}
 }
 
-// DegenerateCertsOnly encodes the given DER-encoded certificates as a
-// certs-only PKCS#7 SignedData and returns its DER encoding. At least one
-// certificate is required.
+// DegenerateCertsOnly encodes DER certificates as a certs-only PKCS#7
+// SignedData. At least one certificate is required.
 func DegenerateCertsOnly(certDER ...[]byte) ([]byte, error) {
 	if len(certDER) == 0 {
 		return nil, errors.New("pkcs7: at least one certificate is required")
 	}
 
-	// certificates [0] IMPLICIT CertificateSet — the field content is the
-	// concatenation of the individual certificate DERs (each already a SEQUENCE).
+	// certificates [0] IMPLICIT CertificateSet: the concatenated cert DERs.
 	var certBytes []byte
 	for i, d := range certDER {
 		if len(d) == 0 {

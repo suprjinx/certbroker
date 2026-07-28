@@ -1,10 +1,5 @@
-// Package bao is a minimal OpenBao client for the certbroker's needs:
-// AppRole authentication with token lifecycle management, and the PKI
-// operations required to broker enrollment (sign CSR, issue, fetch CA chain).
-//
-// It deliberately avoids the full Vault/OpenBao SDK to keep the dependency and
-// audit surface small; only the handful of endpoints the broker uses are
-// implemented.
+// Package bao is a minimal OpenBao client: AppRole auth with token lifecycle,
+// plus sign/issue/ca_chain. Avoids the full SDK to keep the audit surface small.
 package bao
 
 import (
@@ -24,9 +19,8 @@ import (
 	"time"
 )
 
-// Config configures the OpenBao client. File/env resolution (reading the CA
-// bundle, pulling the SecretID from the environment) happens in the wiring
-// layer; this package takes resolved values.
+// Config configures the OpenBao client. File/env resolution happens in the
+// wiring layer; this package takes already-resolved values.
 type Config struct {
 	Address        string        // e.g. https://openbao.internal:8200
 	PKIMount       string        // PKI secrets mount, e.g. "pki_int"
@@ -51,9 +45,8 @@ type Client struct {
 	renewable   bool
 }
 
-// New builds a Client, constructing the HTTP transport with the configured CA
-// trust anchor. It does not perform a login; the first request (or an explicit
-// Login) authenticates.
+// New builds a Client with the configured CA trust anchor. It does not log in;
+// the first request (or an explicit Login) authenticates.
 func New(cfg Config, logger *slog.Logger) (*Client, error) {
 	if cfg.Address == "" {
 		return nil, errors.New("bao: address is required")
@@ -159,8 +152,8 @@ func (c *Client) renewSelf(ctx context.Context) error {
 	return nil
 }
 
-// ensureToken guarantees a usable token, renewing or re-authenticating as
-// needed. Safe for concurrent callers.
+// ensureToken guarantees a usable token, renewing or re-authenticating. Safe
+// for concurrent callers.
 func (c *Client) ensureToken(ctx context.Context) (string, error) {
 	c.mu.Lock()
 	tok := c.token
@@ -194,8 +187,7 @@ func (c *Client) currentToken() string {
 	return c.token
 }
 
-// do issues an authenticated request, ensuring a valid token first, and decodes
-// the JSON response into out (which may be nil).
+// do issues an authenticated request and decodes JSON into out (may be nil).
 func (c *Client) do(ctx context.Context, method, path string, body, out any) error {
 	tok, err := c.ensureToken(ctx)
 	if err != nil {
@@ -204,8 +196,8 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	return c.doRaw(ctx, method, path, body, tok, out)
 }
 
-// doRaw performs a single logical request with retry/backoff on transient
-// failures. token may be empty (for login). If out is nil the body is discarded.
+// doRaw performs one request with retry/backoff on transient failures. An empty
+// token is allowed (login); a nil out discards the body.
 func (c *Client) doRaw(ctx context.Context, method, path string, body any, token string, out any) error {
 	var payload []byte
 	if body != nil {
@@ -273,8 +265,7 @@ func (c *Client) doRaw(ctx context.Context, method, path string, body any, token
 	return lastErr
 }
 
-// doRawBytes is like doRaw but returns the raw (non-JSON) response body, used by
-// endpoints such as ca_chain that return PEM directly.
+// doRawBytes returns the raw body, for endpoints like ca_chain that emit PEM.
 func (c *Client) doRawBytes(ctx context.Context, method, path string) ([]byte, error) {
 	tok, err := c.ensureToken(ctx)
 	if err != nil {
@@ -321,9 +312,8 @@ func (c *Client) doRawBytes(ctx context.Context, method, path string) ([]byte, e
 	return nil, lastErr
 }
 
-// leaseExpiry converts a lease-duration in seconds to an absolute expiry. A
-// zero/negative duration (e.g. root tokens) is treated as far-future so the
-// client neither renews nor re-logs-in needlessly.
+// leaseExpiry converts lease seconds to an absolute expiry; non-positive (root
+// tokens) becomes far-future so the client never renews needlessly.
 func leaseExpiry(seconds int) time.Time {
 	if seconds <= 0 {
 		return time.Now().Add(100 * 365 * 24 * time.Hour)

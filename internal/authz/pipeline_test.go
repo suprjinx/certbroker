@@ -275,10 +275,7 @@ func TestNoRoleDenied(t *testing.T) {
 	})
 }
 
-// TestNoChallengeDoesNotSatisfyARequiredChallenge guards a fail-open trap:
-// NoChallenge accepts unconditionally, so wiring it in as the "none" backend
-// while a device (or global policy) demands a challengePassword would let every
-// request through the challenge stage with no secret at all. The pipeline's
+// TestNoChallengeDoesNotSatisfyARequiredChallenge guards a fail-open trap: the
 // contract is that a required challenge with no validator denies.
 func TestNoChallengeDoesNotSatisfyARequiredChallenge(t *testing.T) {
 	// Globally required.

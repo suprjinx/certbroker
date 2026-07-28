@@ -17,20 +17,14 @@ type ChallengeValidator interface {
 	Validate(ctx context.Context, id Identity, provided string) error
 }
 
-// NoChallenge accepts unconditionally, including when the pipeline has decided
-// a challenge IS required.
-//
-// It is therefore NOT the right way to express "challenges are disabled" — for
-// that, leave Pipeline.Challenge nil, which makes a required challenge deny.
-// Wiring NoChallenge in as the disabled backend would silently satisfy every
-// per-device require_challenge with no secret supplied.
+// NoChallenge accepts unconditionally, even when one IS required. To disable
+// challenges leave Pipeline.Challenge nil instead — see cmd wiring.
 type NoChallenge struct{}
 
 func (NoChallenge) Validate(context.Context, Identity, string) error { return nil }
 
-// StaticSecret validates against a single shared secret using a constant-time
-// comparison. Weak (one secret for the whole fleet) but useful for bootstrapping
-// and SCEP compatibility.
+// StaticSecret validates one shared secret in constant time. Weak (fleet-wide,
+// replayable) but useful for bootstrapping and SCEP compatibility.
 type StaticSecret struct {
 	secret []byte
 }
@@ -50,10 +44,8 @@ func (s *StaticSecret) Validate(_ context.Context, _ Identity, provided string) 
 	return nil
 }
 
-// MemoryStore validates single-use, per-device one-time passwords held in
-// memory. Codes are consumed on first successful use and expire after a TTL.
-// This is the reference implementation; a production deployment would back it
-// with a shared store and an admin provisioning API.
+// MemoryStore holds single-use per-device OTPs, consumed on first success and
+// expiring after a TTL. Process-local: needs a shared store for real use.
 type MemoryStore struct {
 	mu    sync.Mutex
 	codes map[string]otp // key: match value (see Add)

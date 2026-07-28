@@ -24,12 +24,10 @@ import (
 // wellKnownPrefix is the EST application's URI root (RFC 7030 §3.2.2).
 const wellKnownPrefix = "/.well-known/est/"
 
-// defaultMaxRequestBytes bounds an enrollment request body (a CSR is small; this
-// is a DoS guard, not a functional limit).
+// defaultMaxRequestBytes bounds a request body: a DoS guard, not a real limit.
 const defaultMaxRequestBytes = 256 * 1024
 
-// defaultUpstreamTimeout bounds a single OpenBao call made while serving a
-// request.
+// defaultUpstreamTimeout bounds one OpenBao call made while serving a request.
 const defaultUpstreamTimeout = 20 * time.Second
 
 const (
@@ -55,8 +53,7 @@ type Options struct {
 	DeviceRoots *x509.CertPool
 	// Enroller performs issuance against OpenBao.
 	Enroller Enroller
-	// Authorizer decides whether each request may be fulfilled and under what
-	// constraints. Defaults to authz.DenyAll (fail closed) if nil.
+	// Authorizer decides each request; nil means authz.DenyAll (fail closed).
 	Authorizer authz.Authorizer
 	// AllowedKeyTypes optionally restricts CSR key types (empty = any recognized).
 	AllowedKeyTypes []string
@@ -67,14 +64,12 @@ type Options struct {
 	// MinRSABits/MaxRSABits bound CSR RSA moduli; 0 uses the package defaults.
 	MinRSABits int
 	MaxRSABits int
-	// ServerKeyGenKeyType/Bits select the key OpenBao generates for
-	// /serverkeygen. Required when the PKI role's key_type is "any"; empty
-	// defers to the role.
+	// ServerKeyGenKeyType/Bits select the key OpenBao generates for /serverkeygen.
+	// Required when the role's key_type is "any"; empty defers to the role.
 	ServerKeyGenKeyType string
 	ServerKeyGenKeyBits int
-	// UpstreamTimeout bounds a single OpenBao call; 0 uses defaultUpstreamTimeout.
-	// This is separate from the server's write timeout: an unresponsive OpenBao
-	// must not pin request goroutines (and their concurrency slots) indefinitely.
+	// UpstreamTimeout bounds one OpenBao call (0 = default), so a wedged upstream
+	// cannot pin request goroutines and their concurrency slots.
 	UpstreamTimeout time.Duration
 	Logger          *slog.Logger
 }
@@ -124,13 +119,8 @@ func (h *handler) parseCSR(der []byte) (*x509.CertificateRequest, error) {
 	return ParseCSRLimited(der, h.opts.MinRSABits, h.opts.MaxRSABits)
 }
 
-// checkIssued validates a freshly issued certificate against the constraints
-// the authorizer approved, refusing to release it on any mismatch.
-//
-// A failure here is an operator-visible misconfiguration of the OpenBao role
-// (most likely use_csr_sans / use_csr_common_name left at their permissive
-// defaults), not a client error — hence the ERROR level. The certificate has
-// already been issued at this point, so the serial is logged for revocation.
+// checkIssued withholds a certificate exceeding what was authorized: a role
+// misconfiguration, logged at ERROR with the serial since it needs revoking.
 func (h *handler) checkIssued(certDER []byte, d authz.Decision, serial string) error {
 	cert, err := x509.ParseCertificate(certDER)
 	if err != nil {
@@ -163,8 +153,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	// The final path segment is the operation; anything before it is the
-	// optional label (RFC 7030 §3.2.2), reserved for per-tenant/role routing.
+	// Final segment is the operation; anything before it is the optional label.
 	label, op := "", rest
 	if i := strings.LastIndex(rest, "/"); i >= 0 {
 		label, op = rest[:i], rest[i+1:]
@@ -221,9 +210,8 @@ func (h *handler) caCerts(w http.ResponseWriter, r *http.Request) {
 	writePKCS7(w, p7)
 }
 
-// enroll handles both /simpleenroll and /simplereenroll. Re-enrollment requires
-// a client certificate verified against the device trust anchor; initial
-// enrollment treats a verified bootstrap cert as an optional identity input.
+// enroll handles /simpleenroll and /simplereenroll. Re-enrollment demands a
+// device-anchor cert; initial enrollment treats a bootstrap cert as optional.
 func (h *handler) enroll(w http.ResponseWriter, r *http.Request, op authz.Operation, label string) {
 	csrDER, status, err := h.readCSR(r)
 	if err != nil {
@@ -303,10 +291,8 @@ func (h *handler) enroll(w http.ResponseWriter, r *http.Request, op authz.Operat
 	writePKCS7(w, p7)
 }
 
-// serverKeyGen handles /serverkeygen: OpenBao generates the key pair and the
-// response is a multipart/mixed of the private key (PKCS#8) and the certificate
-// (PKCS#7). The CSR still carries the requested subject/SANs and proves the
-// client controls its request (PoP over the CSR's own key).
+// serverKeyGen handles /serverkeygen: OpenBao generates the key and the reply is
+// multipart/mixed of PKCS#8 key + PKCS#7 cert. The CSR still carries PoP.
 func (h *handler) serverKeyGen(w http.ResponseWriter, r *http.Request, label string) {
 	csrDER, status, err := h.readCSR(r)
 	if err != nil {
@@ -407,10 +393,8 @@ func (h *handler) csrAttrs(w http.ResponseWriter, r *http.Request) {
 	w.Write(base64Lines(h.opts.CSRAttrs))
 }
 
-// clientIdentity resolves and verifies the mTLS client certificate for the
-// operation. Re-enrollment and serverkeygen require a valid device cert;
-// initial enrollment returns a verified bootstrap cert when one is presented,
-// or (nil, nil) when none is — leaving the authorization decision to policy.
+// clientIdentity verifies the mTLS cert against the anchor for this operation.
+// Initial enrollment may return (nil, nil), leaving the decision to policy.
 func (h *handler) clientIdentity(r *http.Request, op authz.Operation) (*x509.Certificate, error) {
 	switch op {
 	case authz.OpSimpleReenroll:
@@ -468,9 +452,8 @@ func (h *handler) audit(op authz.Operation, req authz.Request, d authz.Decision,
 	h.logger.Info("enrollment decision", attrs...)
 }
 
-// readCSR reads and decodes the request body into DER, honoring base64
-// Content-Transfer-Encoding and enforcing the size limit. The returned int is
-// an HTTP status to use on error.
+// readCSR decodes the body to DER, honoring base64 CTE and the size limit.
+// The returned int is an HTTP status to use on error.
 func (h *handler) readCSR(r *http.Request) ([]byte, int, error) {
 	raw, err := io.ReadAll(io.LimitReader(r.Body, h.maxReq+1))
 	if err != nil {

@@ -42,19 +42,13 @@ type fakeEnroller struct {
 	t *testing.T
 	// lastLeafDER is the DER of the most recently minted certificate.
 	lastLeafDER []byte
-	// rogueCN / rogueDNS simulate an OpenBao role that ignores the broker's
-	// constraints and echoes the CSR's own names back into the certificate.
+	// rogueCN / rogueDNS make the fake role echo the CSR's own names back.
 	rogueCN  string
 	rogueDNS []string
 }
 
-// issueFor mints a certificate honoring the requested parameters, the way a
-// correctly-configured OpenBao role does. Returning a fixed certificate instead
-// would make every test pass through the post-issuance constraint check
-// vacuously — or fail it — regardless of what the handler asked for.
-//
-// Set rogue to simulate a role with use_csr_sans / use_csr_common_name left at
-// their permissive defaults.
+// issueFor honors the requested parameters as a correct OpenBao role does; the
+// rogue fields instead simulate permissive use_csr_* defaults.
 func (f *fakeEnroller) issueFor(t *testing.T, opts bao.SignOptions) string {
 	t.Helper()
 	cn, dns := opts.CommonName, opts.AltNames

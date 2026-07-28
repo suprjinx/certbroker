@@ -14,11 +14,9 @@ type CertBundle struct {
 	Certificate string
 	// IssuingCA is the immediate issuer (intermediate) certificate in PEM.
 	IssuingCA string
-	// CAChain is the issuer chain in PEM, leaf-issuer first (may be empty
-	// depending on the OpenBao role's configuration).
+	// CAChain is the issuer chain in PEM, leaf-issuer first; may be empty.
 	CAChain []string
-	// PrivateKey is populated only by Issue (server-side key generation); it is
-	// empty for Sign. Callers must treat it as sensitive.
+	// PrivateKey is set only by Issue and must be treated as sensitive.
 	PrivateKey string
 	// SerialNumber is the issued certificate's serial (colon-hex form).
 	SerialNumber string
@@ -45,9 +43,8 @@ func (p pkiData) bundle() *CertBundle {
 	}
 }
 
-// SignOptions are the constrained parameters the broker passes to OpenBao.
-// The broker derives/validates these from the authenticated identity and policy
-// before calling; OpenBao's role enforces them a second time (defense in depth).
+// SignOptions are the policy-bounded parameters passed to OpenBao, which
+// enforces its own role constraints a second time (defense in depth).
 type SignOptions struct {
 	// CommonName, when set, overrides the CSR subject CN at issuance.
 	CommonName string
@@ -59,10 +56,8 @@ type SignOptions struct {
 	TTL string
 	// ExcludeCNFromSANs mirrors the OpenBao flag of the same name.
 	ExcludeCNFromSANs bool
-	// KeyType/KeyBits select the key OpenBao generates for Issue. They are
-	// required when the role's key_type is "any" — which is the useful setting
-	// for Sign, since it lets devices bring any policy-permitted key — and are
-	// ignored by Sign, where the key comes from the CSR.
+	// KeyType/KeyBits select the key Issue generates; required when the role's
+	// key_type is "any". Ignored by Sign, where the key comes from the CSR.
 	KeyType string
 	KeyBits int
 	// Extra carries any additional role-permitted fields without a typed field here.
@@ -93,8 +88,8 @@ func (o SignOptions) apply(body map[string]any) {
 	}
 }
 
-// Sign signs a client-supplied PKCS#10 CSR via pki/sign/:role. This is the EST
-// /simpleenroll and /simplereenroll path: the device holds its own private key.
+// Sign signs a client CSR via pki/sign/:role — the /simpleenroll path, where
+// the device holds its own key.
 func (c *Client) Sign(ctx context.Context, role, csrPEM string, opts SignOptions) (*CertBundle, error) {
 	if role == "" {
 		return nil, errors.New("bao: sign requires a role")
@@ -116,9 +111,8 @@ func (c *Client) Sign(ctx context.Context, role, csrPEM string, opts SignOptions
 	return out.bundle(), nil
 }
 
-// Issue generates a key pair server-side and issues a certificate via
-// pki/issue/:role. This backs EST /serverkeygen; the returned PrivateKey is
-// sensitive and must be delivered to the client over the mTLS channel only.
+// Issue generates the key server-side via pki/issue/:role, backing EST
+// /serverkeygen. The returned PrivateKey is sensitive: mTLS channel only.
 func (c *Client) Issue(ctx context.Context, role, commonName string, opts SignOptions) (*CertBundle, error) {
 	if role == "" {
 		return nil, errors.New("bao: issue requires a role")
@@ -150,9 +144,8 @@ func (c *Client) Issue(ctx context.Context, role, commonName string, opts SignOp
 	return out.bundle(), nil
 }
 
-// CAChain fetches the mount's CA certificate chain as PEM, for serving EST
-// /cacerts. The pki/ca_chain endpoint is unauthenticated in OpenBao but we send
-// the token harmlessly; it returns the concatenated PEM chain directly.
+// CAChain fetches the mount's CA chain as PEM for EST /cacerts. The endpoint is
+// unauthenticated upstream; the token is sent harmlessly.
 func (c *Client) CAChain(ctx context.Context) ([]byte, error) {
 	path := fmt.Sprintf("v1/%s/ca_chain", c.cfg.PKIMount)
 	pem, err := c.doRawBytes(ctx, http.MethodGet, path)

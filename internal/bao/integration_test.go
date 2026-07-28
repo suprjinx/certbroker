@@ -20,9 +20,8 @@ import (
 	"github.com/gr-oss/certbroker/internal/baotest"
 )
 
-// Item 5a: exercise the OpenBao client against a real server, covering the
-// paths httptest fakes cannot vouch for — actual AppRole login, actual PKI
-// response shapes, and actual server-side rejection of out-of-policy requests.
+// Exercises the client against a real server: actual AppRole login, real PKI
+// response shapes, real server-side rejection of out-of-policy requests.
 
 func newClient(t *testing.T, srv *baotest.Server) *bao.Client {
 	t.Helper()
@@ -137,9 +136,8 @@ func TestIntegrationSign(t *testing.T) {
 	}
 }
 
-// TestIntegrationSignHonorsRequestedNames is the defense-in-depth check: the
-// broker constrains what it asks for, and what comes back must match — not the
-// wider set the CSR itself requested.
+// TestIntegrationSignHonorsRequestedNames: what comes back must match what the
+// broker asked for, not the wider set the CSR requested.
 func TestIntegrationSignHonorsRequestedNames(t *testing.T) {
 	srv := baotest.Provision(t, "example.com")
 	c := newClient(t, srv)

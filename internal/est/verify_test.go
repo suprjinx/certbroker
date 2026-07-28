@@ -33,10 +33,8 @@ func TestVerifyIssuedAcceptsMatchingCert(t *testing.T) {
 	}
 }
 
-// TestVerifyIssuedCatchesSANInjection is the case this check exists for: an
-// OpenBao role with use_csr_sans left at its permissive default merges the
-// CSR's own SANs into the certificate, so a device authorized for one name
-// walks away with another.
+// TestVerifyIssuedCatchesSANInjection is why this check exists: use_csr_sans at
+// its default merges the CSR's SANs in, widening the issued identity.
 func TestVerifyIssuedCatchesSANInjection(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "device01.example.com",
 		[]string{"device01.example.com", "sneaky.example.com"})
@@ -146,9 +144,8 @@ func TestVerifyIssuedRejectsUnauthorizedURIAndIP(t *testing.T) {
 	}
 }
 
-// TestRogueRoleIsBlockedEndToEnd drives the whole handler against a fake
-// OpenBao behaving like a misconfigured role, and asserts the client gets
-// nothing rather than an over-broad certificate.
+// TestRogueRoleIsBlockedEndToEnd drives the handler against a misconfigured
+// role and asserts the client gets nothing, not an over-broad certificate.
 func TestRogueRoleIsBlockedEndToEnd(t *testing.T) {
 	fe := newFakeEnroller(t)
 	fe.rogueDNS = []string{"sneaky.example.com"} // role echoes the CSR's SANs

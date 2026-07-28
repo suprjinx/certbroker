@@ -1,17 +1,5 @@
 // Package baotest provisions an isolated PKI mount and AppRole on a live
-// OpenBao server for integration tests.
-//
-// Tests using it are guarded by the `integration` build tag and skip unless
-// CERTBROKER_TEST_OPENBAO_ADDR is set, so the default `go test ./...` stays
-// hermetic. Point it at the dev stack:
-//
-//	make dev-up
-//	CERTBROKER_TEST_OPENBAO_ADDR=http://localhost:8200 \
-//	CERTBROKER_TEST_OPENBAO_TOKEN=dev-root-token \
-//	  go test -tags=integration -count=1 ./...
-//
-// Each call to Provision creates a uniquely-named mount and AppRole and tears
-// them down via t.Cleanup, so parallel and repeated runs do not collide.
+// OpenBao for integration tests; see docs/runbook.md §9 for how to run them.
 package baotest
 
 import (
@@ -27,8 +15,8 @@ import (
 	"time"
 )
 
-// Env vars naming the target server. Both must be set for integration tests to
-// run; the token must be able to mount secrets engines and write policies.
+// Env vars naming the target server; the token must be able to mount engines
+// and write policies. Unset means integration tests skip.
 const (
 	EnvAddr  = "CERTBROKER_TEST_OPENBAO_ADDR"
 	EnvToken = "CERTBROKER_TEST_OPENBAO_TOKEN"
@@ -45,8 +33,7 @@ type Server struct {
 	RoleID   string
 	SecretID string
 
-	// CACertPEM is the mount's CA certificate — the anchor that issued certs
-	// chain to, i.e. the device trust anchor for re-enrollment.
+	// CACertPEM is the mount's CA: the device anchor for re-enrollment.
 	CACertPEM []byte
 
 	token  string
@@ -54,11 +41,8 @@ type Server struct {
 	t      *testing.T
 }
 
-// Provision creates an isolated PKI mount, issuing role, and least-privilege
-// AppRole, and registers cleanup. It skips the test when the env vars are unset.
-//
-// allowedDomains is passed through to the PKI role; issuance of anything
-// outside it fails at OpenBao regardless of what the broker authorizes.
+// Provision creates an isolated mount, role, and AppRole, registering cleanup.
+// Skips the test when the env vars are unset.
 func Provision(t *testing.T, allowedDomains string) *Server {
 	t.Helper()
 
@@ -116,16 +100,15 @@ func (s *Server) writeRole(allowedDomains string) {
 	s.t.Helper()
 	s.writeRoleWith(s.Role, map[string]any{
 		"allowed_domains": allowedDomains,
-		// Not the OpenBao defaults, and security-critical: left true, the CSR's
-		// own CN and SANs merge into the issued certificate alongside the
-		// broker's constrained parameters, defeating the constraint policy.
+		// Not the OpenBao defaults, and security-critical: left true, the CSR's own
+		// names merge into the cert and defeat the constraint policy.
 		"use_csr_common_name": false,
 		"use_csr_sans":        false,
 	})
 }
 
-// WriteRole creates an additional PKI role with the given overrides layered
-// over the defaults. Tests use it to provision a deliberately permissive role.
+// WriteRole adds a PKI role with overrides layered over the defaults, for tests
+// needing a deliberately permissive one.
 func (s *Server) WriteRole(name string, overrides map[string]any) {
 	s.t.Helper()
 	s.writeRoleWith(name, overrides)
@@ -155,8 +138,7 @@ func (s *Server) writeRoleWith(name string, overrides map[string]any) {
 
 func (s *Server) enableAppRole() {
 	s.t.Helper()
-	// Already-enabled is the normal case on a shared dev server; the mount is
-	// global rather than per-test, so a failure here is not fatal.
+	// Already-enabled is normal on a shared dev server, so failure is not fatal.
 	var out map[string]any
 	if err := s.request(http.MethodGet, "v1/sys/auth", nil, &out); err == nil {
 		if _, ok := out["approle/"]; ok {
@@ -168,12 +150,8 @@ func (s *Server) enableAppRole() {
 
 func (s *Server) writePolicy() {
 	s.t.Helper()
-	// The capability set the broker needs: sign, issue, and read the chain for
-	// /cacerts and the readiness probe.
-	//
-	// Wildcarded over role names so a test can provision extra roles; the
-	// least-privilege form naming a single role is in
-	// deploy/provision-openbao.sh, which is what a deployment should copy.
+	// Wildcarded over role names so tests can add roles; the least-privilege form
+	// naming one role is in deploy/provision-openbao.sh, which deployments copy.
 	policy := fmt.Sprintf(`
 path "%[1]s/sign/*"   { capabilities = ["create", "update"] }
 path "%[1]s/issue/*"  { capabilities = ["create", "update"] }
@@ -240,7 +218,7 @@ func (s *Server) readCACert() []byte {
 func (s *Server) IssueSecretID() string { return s.issueSecretID() }
 
 func (s *Server) teardown() {
-	// Best effort: a leaked test mount on a dev server is noise, not a failure.
+	// Best effort: a leaked test mount is noise, not a failure.
 	_ = s.try(http.MethodDelete, "v1/sys/mounts/"+s.Mount, nil, nil)
 	_ = s.try(http.MethodDelete, "v1/auth/approle/role/"+s.AppRole, nil, nil)
 	_ = s.try(http.MethodDelete, "v1/sys/policies/acl/"+s.PolicyName(), nil, nil)

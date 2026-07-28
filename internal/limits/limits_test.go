@@ -179,9 +179,8 @@ func TestEvictionDoesNotResetActiveBudget(t *testing.T) {
 		do(h, "198.51.100."+itoa(i%256)+":1")
 	}
 
-	// The victim may have been evicted — that is allowed — but if it was, it
-	// gets a fresh burst. What must NOT happen is silent unlimited access, so
-	// assert the limit re-engages within one burst worth of requests.
+	// Eviction is allowed (it grants a fresh burst); silent unlimited access is
+	// not, so assert the limit re-engages within one burst.
 	limited := false
 	for range 5 {
 		if do(h, victim) == http.StatusTooManyRequests {
@@ -241,9 +240,8 @@ func TestSlotIsReleased(t *testing.T) {
 	}
 }
 
-// TestForwardedHeadersAreIgnored is the security-critical case: if the limiter
-// keyed off X-Forwarded-For, a client could rotate the header and never be
-// limited.
+// TestForwardedHeadersAreIgnored: keying off X-Forwarded-For would let a client
+// rotate the header and never be limited.
 func TestForwardedHeadersAreIgnored(t *testing.T) {
 	clk := newClock()
 	h := testLimiter(t, clk, nil).Middleware(okHandler())

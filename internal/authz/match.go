@@ -2,13 +2,8 @@ package authz
 
 import "strings"
 
-// globMatch reports whether value matches pattern. Supported forms:
-//
-//	"*"              matches anything
-//	"*.example.com"  suffix wildcard: matches sub.example.com (one or more labels)
-//	"exact"          exact, case-insensitive match
-//
-// Matching is case-insensitive, which suits DNS names and X.509 subject fields.
+// globMatch matches value against "*" (anything), "*.suffix" (one or more
+// leading labels), or an exact string. Case-insensitive throughout.
 func globMatch(pattern, value string) bool {
 	pattern = strings.ToLower(strings.TrimSpace(pattern))
 	value = strings.ToLower(strings.TrimSpace(value))

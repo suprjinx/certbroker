@@ -6,10 +6,8 @@ import (
 	"strings"
 )
 
-// Identity is the resolved view of who is making a request and what they are
-// asking for. It separates the *authenticated* identity (from a verified mTLS
-// client certificate, when present) from the *requested* identity (the subject
-// and SANs in the CSR). Policy decisions compare the two.
+// Identity separates the authenticated identity (verified client cert) from the
+// requested one (CSR subject/SANs). Policy decisions compare the two.
 type Identity struct {
 	// Authenticated is true when a verified client certificate was presented
 	// (always true for re-enrollment; optional for initial enrollment).

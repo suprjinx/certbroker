@@ -1,6 +1,5 @@
-// Command certbroker is a certificate enrollment broker that fronts OpenBao's
-// pki/issue endpoint, supporting the EST (and, later, SCEP) enrollment
-// protocols with per-device authorization.
+// Command certbroker brokers EST (later SCEP) enrollment onto OpenBao's PKI,
+// authorizing each device before it issues.
 package main
 
 import (
@@ -101,8 +100,7 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 	}
 
 	// --- DoS controls ---
-	// Wrapped outside the EST handler so rate limiting happens before any CSR
-	// parsing or signature verification, which is the work being protected.
+	// Outside the handler, so limits apply before any CSR parsing or PoP check.
 	limiter := limits.New(limits.Config{
 		PerClientRate:  cfg.Limits.PerClientRate,
 		PerClientBurst: cfg.Limits.PerClientBurst,
@@ -134,9 +132,8 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
-	// The health listener is unauthenticated, so it gets the same connection
-	// timeouts. It is not rate limited: probes must not be shed, and it should
-	// be bound to a management interface rather than exposed.
+	// Unauthenticated, so it gets the same timeouts. Not rate limited: probes
+	// must not be shed, and it belongs on a management interface.
 	healthSrv := &http.Server{
 		Addr:              cfg.Server.HealthAddr,
 		Handler:           healthHandler(baoClient),
@@ -186,9 +183,8 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 	return nil
 }
 
-// selectAuthorizer builds the authorization pipeline from config. The
-// -dev-insecure-allow-all flag replaces it with AllowAllEcho (no checks) for
-// local development only.
+// selectAuthorizer builds the pipeline from config; -dev-insecure-allow-all
+// swaps in AllowAllEcho (no checks) for local development only.
 func selectAuthorizer(logger *slog.Logger, cfg *config.Config, devAllowAll bool, devRole string) (authz.Authorizer, error) {
 	if devAllowAll {
 		role := devRole
@@ -250,11 +246,8 @@ func buildInventory(cfg *config.Config) (authz.Inventory, error) {
 func buildChallenge(cfg *config.Config) (authz.ChallengeValidator, error) {
 	switch cfg.Challenge.Backend {
 	case "", "none":
-		// nil, NOT authz.NoChallenge{}. The pipeline treats a nil validator as
-		// "a required challenge cannot be satisfied" and denies, which is the
-		// fail-closed behavior we want. NoChallenge accepts unconditionally, so
-		// returning it here would make an inventory record's require_challenge
-		// silently pass with no secret supplied at all.
+		// nil, NOT NoChallenge{}: the pipeline denies a required challenge when the
+		// validator is nil, whereas NoChallenge would silently satisfy it.
 		return nil, nil
 	case "static":
 		if cfg.Challenge.StaticSecretEnv == "" {
@@ -266,8 +259,8 @@ func buildChallenge(cfg *config.Config) (authz.ChallengeValidator, error) {
 	}
 }
 
-// healthHandler serves liveness and readiness. Readiness probes OpenBao by
-// fetching the CA chain, which also exercises AppRole auth.
+// healthHandler serves liveness and readiness; readiness probes OpenBao, which
+// also exercises AppRole auth.
 func healthHandler(baoClient *bao.Client) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {

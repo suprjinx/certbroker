@@ -7,9 +7,8 @@ import (
 
 // SAN constraint modes.
 const (
-	// SANModeIdentity derives the permitted names from the authenticated
-	// identity (re-enrollment) or, for unauthenticated bootstrap, from the
-	// inventory record's allowlist. This is the safe default.
+	// SANModeIdentity derives names from the authenticated identity, falling back
+	// to the inventory allowlist for unauthenticated bootstrap. The safe default.
 	SANModeIdentity = "identity"
 	// SANModeAllowlist permits only names matched by the inventory record's
 	// AllowedDNSNames, regardless of authentication.
@@ -19,9 +18,8 @@ const (
 	SANModeCSR = "csr"
 )
 
-// ConstraintBuilder turns an authorized identity + inventory record into the
-// concrete, bounded parameters the broker will request from OpenBao. Returning
-// an error denies the request.
+// ConstraintBuilder turns an identity + inventory record into the bounded
+// parameters requested from OpenBao. An error denies the request.
 type ConstraintBuilder interface {
 	Build(id Identity, rec Record) (CertConstraints, error)
 }
@@ -69,10 +67,8 @@ func (b *StandardConstraints) Build(id Identity, rec Record) (CertConstraints, e
 	}
 }
 
-// fromAuthenticatedIdentity pins the issued names to the authenticated cert.
-// The device may re-key but may not broaden its identity: every requested name
-// must already be covered by the client certificate. This enforces identity
-// continuity across re-enrollment.
+// fromAuthenticatedIdentity pins issued names to the authenticated cert: a
+// device may re-key but not rename itself. This is identity continuity.
 func (b *StandardConstraints) fromAuthenticatedIdentity(id Identity) (CertConstraints, error) {
 	permitted := append([]string{id.CommonName}, id.DNSNames...)
 

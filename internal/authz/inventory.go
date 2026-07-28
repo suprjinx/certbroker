@@ -30,9 +30,8 @@ type Inventory interface {
 	Lookup(ctx context.Context, id Identity) (Record, error)
 }
 
-// NoInventory permits every device (returns Found=true with no extra
-// constraints). Use only when authorization relies entirely on mTLS + challenge
-// + constraint policy.
+// NoInventory permits every device. Use only when mTLS + challenge + constraint
+// policy carry the whole authorization decision.
 type NoInventory struct{}
 
 func (NoInventory) Lookup(context.Context, Identity) (Record, error) {

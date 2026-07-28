@@ -1,12 +1,7 @@
 //go:build integration
 
-// Package e2e drives the assembled broker — real TLS, real mTLS, the real
-// authorization pipeline, and a real OpenBao — the way a device would.
-//
-//	make dev-up
-//	CERTBROKER_TEST_OPENBAO_ADDR=http://localhost:8200 \
-//	CERTBROKER_TEST_OPENBAO_TOKEN=dev-root-token \
-//	  go test -tags=integration -count=1 ./test/e2e/
+// Package e2e drives the assembled broker the way a device would: real TLS,
+// real mTLS, the real pipeline, a real OpenBao. See docs/runbook.md §9.
 package e2e
 
 import (
@@ -103,8 +98,7 @@ func (ca *testCA) issue(t *testing.T, cn string, eku x509.ExtKeyUsage, dns []str
 	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
 }
 
-// newHarness provisions OpenBao and stands up the broker over TLS with the real
-// authorization pipeline behind it.
+// newHarness provisions OpenBao and stands up the broker over TLS.
 func newHarness(t *testing.T, inventoryYAML string, role string) *harness {
 	t.Helper()
 
@@ -164,8 +158,7 @@ func newHarness(t *testing.T, inventoryYAML string, role string) *harness {
 		t.Fatal(err)
 	}
 
-	// The server cert is signed by the bootstrap CA purely so the test client
-	// has something to trust; it is unrelated to enrollment.
+	// Signed by the bootstrap CA only so the client trusts it; unrelated to enrollment.
 	serverCert := bootstrapCA.issue(t, "localhost", x509.ExtKeyUsageServerAuth,
 		[]string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
 
@@ -177,8 +170,7 @@ func newHarness(t *testing.T, inventoryYAML string, role string) *harness {
 	return &harness{srv: srv, bao: baoSrv, boot: bootstrapCA, device: devicePool}
 }
 
-// client builds an HTTPS client presenting the given client certificate (or
-// none) and trusting the broker's server cert.
+// client builds an HTTPS client presenting cert (or none) and trusting the broker.
 func (h *harness) client(cert *tls.Certificate) *http.Client {
 	cfg := &tls.Config{RootCAs: h.boot.pool, MinVersion: tls.VersionTLS12}
 	if cert != nil {
@@ -241,8 +233,7 @@ func makeCSR(t *testing.T, cn string, dns ...string) ([]byte, *ecdsa.PrivateKey)
 	return der, key
 }
 
-// certsFromPKCS7 extracts the certificates from a degenerate (certs-only)
-// PKCS#7 SignedData — the mirror of internal/pkcs7's encoder.
+// certsFromPKCS7 decodes a degenerate PKCS#7, mirroring internal/pkcs7.
 func certsFromPKCS7(t *testing.T, der []byte) []*x509.Certificate {
 	t.Helper()
 
@@ -293,8 +284,7 @@ devices:
 
 // --- tests ---
 
-// TestEnrollThenReenroll is item 20: the full lifecycle a device actually goes
-// through, across both trust anchors.
+// TestEnrollThenReenroll walks the full device lifecycle across both anchors.
 func TestEnrollThenReenroll(t *testing.T) {
 	h := newHarness(t, inventoryOneDevice, "")
 
@@ -337,8 +327,7 @@ func TestEnrollThenReenroll(t *testing.T) {
 	}
 }
 
-// TestBootstrapCertCannotRenew is the reason the two anchors are separate: a
-// bootstrap credential must not be usable as a renewal credential.
+// TestBootstrapCertCannotRenew: a bootstrap credential must not renew.
 func TestBootstrapCertCannotRenew(t *testing.T) {
 	h := newHarness(t, inventoryOneDevice, "")
 	bootstrapCert := h.boot.issue(t, "device01.example.com", x509.ExtKeyUsageClientAuth,
@@ -373,9 +362,8 @@ func TestDeviceNotInInventoryRejected(t *testing.T) {
 	}
 }
 
-// TestSANEscalationRejected: an inventoried device asking for a name beyond its
-// authenticated identity is refused by the constraint policy, before OpenBao is
-// ever called.
+// TestSANEscalationRejected: a name beyond the authenticated identity is
+// refused by policy, before OpenBao is called.
 func TestSANEscalationRejected(t *testing.T) {
 	h := newHarness(t, inventoryOneDevice, "")
 	cert := h.boot.issue(t, "device01.example.com", x509.ExtKeyUsageClientAuth,
@@ -388,24 +376,8 @@ func TestSANEscalationRejected(t *testing.T) {
 	}
 }
 
-// TestPermissiveRoleCannotSubstituteCN is the end-to-end proof of the
-// post-issuance check, against a REAL OpenBao.
-//
-// Constructing the gap takes care, because the constraint policy closes most of
-// it on its own. The opening is the common name:
-//
-//   - The device authenticates with a certificate whose CN is device01 but
-//     whose SANs also cover extra.example.com. Both names are therefore part of
-//     its authenticated identity, so policy does not object to either.
-//   - Its CSR asks for CN=extra.example.com. StandardConstraints permits that
-//     (the name is in the identity) but pins the *authorized* CN to the
-//     identity's own CN — device01 — which is what the broker sends to OpenBao.
-//   - The role has use_csr_common_name at OpenBao's permissive default, so
-//     OpenBao ignores the broker's common_name and honors the CSR's instead.
-//
-// OpenBao consequently issues a certificate for a name the broker did not
-// authorize, and verifyIssued is the only thing between that certificate and
-// the client. The client must receive nothing.
+// TestPermissiveRoleCannotSubstituteCN proves the post-issuance check on real
+// OpenBao: policy pins the CN to device01, use_csr_common_name overrides it.
 func TestPermissiveRoleCannotSubstituteCN(t *testing.T) {
 	inventory := `
 devices:
@@ -444,9 +416,8 @@ devices:
 	}
 }
 
-// TestStrictRoleIssuesTheAuthorizedName is the control for the test above: the
-// identical request against a correctly-configured role (use_csr_* false)
-// succeeds and yields the name the broker authorized, not the one asked for.
+// TestStrictRoleIssuesTheAuthorizedName is the control: the same request against
+// a correct role yields the authorized name, not the requested one.
 func TestStrictRoleIssuesTheAuthorizedName(t *testing.T) {
 	inventory := `
 devices:
@@ -469,8 +440,7 @@ devices:
 	}
 }
 
-// newHarnessOnRole rebuilds the broker against an existing OpenBao server but a
-// different PKI role.
+// newHarnessOnRole rebuilds the broker against the same OpenBao, a new role.
 func newHarnessOnRole(t *testing.T, base *harness, inventoryYAML, role string) *harness {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -554,8 +524,8 @@ func TestCACerts(t *testing.T) {
 	}
 }
 
-// TestServerKeyGen exercises the broker-generated-key path against real
-// OpenBao, which is where the role's key_type=any requirement surfaced.
+// TestServerKeyGen covers the broker-generated-key path, where the role's
+// key_type=any requirement surfaced.
 func TestServerKeyGen(t *testing.T) {
 	h := newHarness(t, inventoryOneDevice, "")
 	cert := h.boot.issue(t, "device01.example.com", x509.ExtKeyUsageClientAuth,

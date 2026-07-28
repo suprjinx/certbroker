@@ -9,9 +9,8 @@ import (
 	"testing"
 )
 
-// makeRSACSR builds an RSA CSR of the given modulus size and returns its DER.
-// Key sizes are kept small deliberately: the bounds under test are passed
-// explicitly, so there is no need to generate an actually-huge key.
+// makeRSACSR builds an RSA CSR of the given size. Sizes stay small: the bounds
+// are passed explicitly, so no huge key needs generating.
 func makeRSACSR(t *testing.T, bits int, cn string) []byte {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, bits)
@@ -57,10 +56,7 @@ func TestParseCSRLimitedRejectsOversizedRSA(t *testing.T) {
 }
 
 // TestKeySizeCheckedBeforeSignature pins the ordering that makes the ceiling a
-// DoS control rather than a policy nicety: an oversized key must be rejected
-// without the signature ever being verified. The CSR here has a deliberately
-// corrupted signature, so if verification ran first the error would name the
-// proof-of-possession instead of the key size.
+// DoS control: the signature here is corrupt, so a PoP error means it ran first.
 func TestKeySizeCheckedBeforeSignature(t *testing.T) {
 	der := makeRSACSR(t, 2048, "big.example.com")
 	corrupt := make([]byte, len(der))
@@ -83,8 +79,7 @@ func TestParseCSRLimitedZeroBoundsUseDefaults(t *testing.T) {
 	}
 }
 
-// TestNonRSAKeysBypassBounds confirms the bounds are RSA-specific: EC keys have
-// a fixed, small verification cost and must not be caught by a bit-length test.
+// TestNonRSAKeysBypassBounds: the bounds are RSA-specific; EC must pass through.
 func TestNonRSAKeysBypassBounds(t *testing.T) {
 	der := makeCSR(t, "ec.example.com")
 	if _, err := ParseCSRLimited(der, 4096, 4096); err != nil {

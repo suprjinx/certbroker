@@ -18,8 +18,8 @@ import (
 	"github.com/gr-oss/certbroker/internal/bao"
 )
 
-// blockingEnroller stands in for an OpenBao that has stopped responding: every
-// call waits for its context, so the handler's own deadline is what ends it.
+// blockingEnroller is an OpenBao that stopped responding: every call waits on
+// its context, so the handler's deadline is what ends it.
 type blockingEnroller struct{}
 
 func (blockingEnroller) Sign(ctx context.Context, _, _ string, _ bao.SignOptions) (*bao.CertBundle, error) {
@@ -67,9 +67,8 @@ func TestRequestSizeLimit(t *testing.T) {
 	}
 }
 
-// TestRequestSizeLimitIsCheckedBeforeParsing confirms the body cap short-circuits
-// before any ASN.1 work: the payload here is not a valid CSR, so a 400 would
-// mean the parser ran on an oversized body.
+// TestRequestSizeLimitIsCheckedBeforeParsing: the payload is not a valid CSR, so
+// a 400 would mean the parser ran on an oversized body.
 func TestRequestSizeLimitIsCheckedBeforeParsing(t *testing.T) {
 	fe := newFakeEnroller(t)
 	h, err := NewHandler(quietOpts(Options{
@@ -111,8 +110,7 @@ func TestEmptyBodyRejected(t *testing.T) {
 	}
 }
 
-// TestUpstreamTimeout verifies a wedged OpenBao does not pin the request
-// goroutine: the handler's own deadline fires and the request is failed.
+// TestUpstreamTimeout: a wedged OpenBao must not pin the request goroutine.
 func TestUpstreamTimeout(t *testing.T) {
 	h, err := NewHandler(quietOpts(Options{
 		Enroller:        blockingEnroller{},
@@ -161,8 +159,7 @@ func TestCACertsUpstreamTimeout(t *testing.T) {
 	}
 }
 
-// TestEnrollRejectsUndersizedRSAKey exercises the handler's configured RSA
-// floor end to end.
+// TestEnrollRejectsUndersizedRSAKey exercises the RSA floor end to end.
 func TestEnrollRejectsUndersizedRSAKey(t *testing.T) {
 	fe := newFakeEnroller(t)
 	h, err := NewHandler(quietOpts(Options{
@@ -199,9 +196,8 @@ func TestEnrollRejectsUndersizedRSAKey(t *testing.T) {
 	}
 }
 
-// TestServerKeyGenEnforcesKeyTypePolicy covers the key-type allowlist on the
-// /serverkeygen path, which previously validated the CSR's proof-of-possession
-// key without consulting policy.
+// TestServerKeyGenEnforcesKeyTypePolicy covers the key-type allowlist on
+// /serverkeygen, which previously ignored policy entirely.
 func TestServerKeyGenEnforcesKeyTypePolicy(t *testing.T) {
 	fe := newFakeEnroller(t)
 	pki := newTestPKI(t)
@@ -227,8 +223,8 @@ func TestServerKeyGenEnforcesKeyTypePolicy(t *testing.T) {
 	}
 }
 
-// TestBase64AndRawDERBothAccepted guards the readCSR content-transfer-encoding
-// handling, which the size limit shares a code path with.
+// TestBase64AndRawDERBothAccepted guards readCSR's CTE handling, which shares a
+// code path with the size limit.
 func TestBase64AndRawDERBothAccepted(t *testing.T) {
 	fe := newFakeEnroller(t)
 	srv := httptest.NewServer(newTestHandler(t, fe, authz.AllowAllEcho{Role: "r"}, nil, nil))
