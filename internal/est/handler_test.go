@@ -37,17 +37,55 @@ type fakeEnroller struct {
 
 	lastRole string
 	lastOpts bao.SignOptions
+
+	// t enables parameter-honoring issuance (see issueFor).
+	t *testing.T
+	// lastLeafDER is the DER of the most recently minted certificate.
+	lastLeafDER []byte
+	// rogueCN / rogueDNS simulate an OpenBao role that ignores the broker's
+	// constraints and echoes the CSR's own names back into the certificate.
+	rogueCN  string
+	rogueDNS []string
+}
+
+// issueFor mints a certificate honoring the requested parameters, the way a
+// correctly-configured OpenBao role does. Returning a fixed certificate instead
+// would make every test pass through the post-issuance constraint check
+// vacuously — or fail it — regardless of what the handler asked for.
+//
+// Set rogue to simulate a role with use_csr_sans / use_csr_common_name left at
+// their permissive defaults.
+func (f *fakeEnroller) issueFor(t *testing.T, opts bao.SignOptions) string {
+	t.Helper()
+	cn, dns := opts.CommonName, opts.AltNames
+	if f.rogueCN != "" || len(f.rogueDNS) > 0 {
+		if f.rogueCN != "" {
+			cn = f.rogueCN
+		}
+		dns = append(append([]string{}, opts.AltNames...), f.rogueDNS...)
+	} else if len(dns) == 0 && cn != "" {
+		dns = []string{cn}
+	}
+	pemStr, der, _, _ := genLeafWithSANs(t, cn, dns)
+	f.lastLeafDER = der
+	return pemStr
 }
 
 func (f *fakeEnroller) Sign(_ context.Context, role, _ string, opts bao.SignOptions) (*bao.CertBundle, error) {
 	f.lastRole = role
 	f.lastOpts = opts
+	if f.t != nil && opts.CommonName != "" {
+		return &bao.CertBundle{Certificate: f.issueFor(f.t, opts)}, nil
+	}
 	return &bao.CertBundle{Certificate: f.leafPEM}, nil
 }
 
 func (f *fakeEnroller) Issue(_ context.Context, role, _ string, opts bao.SignOptions) (*bao.CertBundle, error) {
 	f.lastRole = role
 	f.lastOpts = opts
+	if f.t != nil && opts.CommonName != "" {
+		return &bao.CertBundle{Certificate: f.issueFor(f.t, opts), PrivateKey: f.keyPEM}, nil
+	}
 	return &bao.CertBundle{Certificate: f.leafPEM, PrivateKey: f.keyPEM}, nil
 }
 
@@ -64,17 +102,29 @@ func newFakeEnroller(t *testing.T) *fakeEnroller {
 		leafDER:    certDER,
 		keyPEM:     keyPEM,
 		keyDER:     keyDER,
+		t:          t,
 	}
 }
 
 // genLeaf makes a self-signed cert + PKCS#8 key and returns PEM + DER for each.
 func genLeaf(t *testing.T, cn string) (certPEM string, certDER []byte, keyPEM string, keyDER []byte) {
+	return genLeafWithSANs(t, cn, nil)
+}
+
+// genLeafWithSANs is genLeaf with explicit dNSName SANs.
+func genLeafWithSANs(t *testing.T, cn string, dns []string) (certPEM string, certDER []byte, keyPEM string, keyDER []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: cn}}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: cn},
+		DNSNames:     dns,
+		NotBefore:    time.Now().Add(-time.Minute),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
 	certDER, err = x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
 		t.Fatal(err)
@@ -221,7 +271,7 @@ func TestSimpleEnrollHappy(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	p7 := decodeBase64Body(t, resp)
-	if !bytes.Contains(p7, fe.leafDER) {
+	if !bytes.Contains(p7, fe.lastLeafDER) {
 		t.Error("pkcs7 does not contain the issued leaf DER")
 	}
 	if fe.lastRole != "server-role" {
@@ -309,7 +359,7 @@ func TestReenrollRequiresClientCert(t *testing.T) {
 		t.Fatalf("with-cert status = %d, want 200", resp2.StatusCode)
 	}
 	p7 := decodeBase64Body(t, resp2)
-	if !bytes.Contains(p7, fe.leafDER) {
+	if !bytes.Contains(p7, fe.lastLeafDER) {
 		t.Error("reenroll pkcs7 missing leaf DER")
 	}
 }
@@ -357,7 +407,7 @@ func TestServerKeyGen(t *testing.T) {
 			}
 		case strings.Contains(part.Header.Get("Content-Type"), "pkcs7"):
 			sawCert = true
-			if !bytes.Contains(dec, fe.leafDER) {
+			if !bytes.Contains(dec, fe.lastLeafDER) {
 				t.Error("pkcs7 part missing cert DER")
 			}
 		}

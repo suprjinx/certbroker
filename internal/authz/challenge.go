@@ -17,9 +17,13 @@ type ChallengeValidator interface {
 	Validate(ctx context.Context, id Identity, provided string) error
 }
 
-// NoChallenge accepts unconditionally. It is only reached when the pipeline has
-// decided a challenge is not required; when a challenge IS required, a nil
-// validator is treated as a denial by the pipeline.
+// NoChallenge accepts unconditionally, including when the pipeline has decided
+// a challenge IS required.
+//
+// It is therefore NOT the right way to express "challenges are disabled" — for
+// that, leave Pipeline.Challenge nil, which makes a required challenge deny.
+// Wiring NoChallenge in as the disabled backend would silently satisfy every
+// per-device require_challenge with no secret supplied.
 type NoChallenge struct{}
 
 func (NoChallenge) Validate(context.Context, Identity, string) error { return nil }

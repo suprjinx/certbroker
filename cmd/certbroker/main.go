@@ -83,16 +83,18 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 
 	// --- EST handler ---
 	handler, err := est.NewHandler(est.Options{
-		BootstrapRoots:  bootstrapRoots,
-		DeviceRoots:     deviceRoots,
-		Enroller:        baoClient,
-		Authorizer:      authorizer,
-		AllowedKeyTypes: cfg.Policy.AllowedKeyTypes,
-		MaxRequestBytes: cfg.Server.MaxRequestBytes,
-		MinRSABits:      cfg.Policy.MinRSABits,
-		MaxRSABits:      cfg.Policy.MaxRSABits,
-		UpstreamTimeout: cfg.Limits.UpstreamTimeout.Std(),
-		Logger:          logger,
+		BootstrapRoots:      bootstrapRoots,
+		DeviceRoots:         deviceRoots,
+		Enroller:            baoClient,
+		Authorizer:          authorizer,
+		AllowedKeyTypes:     cfg.Policy.AllowedKeyTypes,
+		MaxRequestBytes:     cfg.Server.MaxRequestBytes,
+		MinRSABits:          cfg.Policy.MinRSABits,
+		MaxRSABits:          cfg.Policy.MaxRSABits,
+		ServerKeyGenKeyType: cfg.Policy.ServerKeyGenKeyType,
+		ServerKeyGenKeyBits: cfg.Policy.ServerKeyGenKeyBits,
+		UpstreamTimeout:     cfg.Limits.UpstreamTimeout.Std(),
+		Logger:              logger,
 	})
 	if err != nil {
 		return err
@@ -248,7 +250,12 @@ func buildInventory(cfg *config.Config) (authz.Inventory, error) {
 func buildChallenge(cfg *config.Config) (authz.ChallengeValidator, error) {
 	switch cfg.Challenge.Backend {
 	case "", "none":
-		return authz.NoChallenge{}, nil
+		// nil, NOT authz.NoChallenge{}. The pipeline treats a nil validator as
+		// "a required challenge cannot be satisfied" and denies, which is the
+		// fail-closed behavior we want. NoChallenge accepts unconditionally, so
+		// returning it here would make an inventory record's require_challenge
+		// silently pass with no secret supplied at all.
+		return nil, nil
 	case "static":
 		if cfg.Challenge.StaticSecretEnv == "" {
 			return nil, errors.New("challenge.static_secret_env is required for the static backend")

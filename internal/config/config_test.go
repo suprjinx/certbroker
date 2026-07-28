@@ -193,3 +193,35 @@ func TestDurationAcceptsBareSeconds(t *testing.T) {
 		t.Errorf("acquire_timeout = %v, want 30s", got)
 	}
 }
+
+// TestRequireChallengeWithoutBackendRejected: demanding a challengePassword
+// with no backend able to validate one would deny every enrollment at runtime.
+func TestRequireChallengeWithoutBackendRejected(t *testing.T) {
+	_, err := Load(writeConfig(t, minimalConfig+`
+policy:
+  require_challenge_password: true
+`))
+	if err == nil {
+		t.Fatal("expected require_challenge_password with no backend to be rejected")
+	}
+	if !strings.Contains(err.Error(), "challenge.backend") {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestRequireChallengeWithBackendAccepted(t *testing.T) {
+	t.Setenv("CB_STATIC_SECRET", "s3cr3t")
+	cfg, err := Load(writeConfig(t, minimalConfig+`
+policy:
+  require_challenge_password: true
+challenge:
+  backend: static
+  static_secret_env: CB_STATIC_SECRET
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Policy.RequireCPP {
+		t.Error("require_challenge_password did not survive the round trip")
+	}
+}

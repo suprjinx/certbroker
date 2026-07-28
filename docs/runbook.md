@@ -178,6 +178,17 @@ through this list:
 - [ ] **OpenBao over TLS.** Set `openbao.address` to `https://` and
       `openbao.ca_cert_file`. Over plaintext, the AppRole SecretID and every
       issued certificate are on the wire.
+- [ ] **`use_csr_sans=false` and `use_csr_common_name=false` on every PKI role
+      the broker uses.** These are **not** OpenBao's defaults and they are the
+      single most important role setting here. Left at their defaults (`true`),
+      OpenBao merges the CSR's own subject and SANs into the issued certificate
+      *alongside* the parameters the broker sends — so a device authorized for
+      one name receives any other name the role's `allowed_domains` permits,
+      simply by putting it in the CSR. That silently defeats the entire
+      constraint policy. The broker independently verifies the returned
+      certificate and refuses to release an over-broad one (§8), so a role
+      misconfigured this way fails closed and logs loudly rather than leaking —
+      but fix the role, do not rely on the backstop.
 - [ ] **Real PKI.** The dev script generates a self-signed root *inside* the
       mount. Production should make this mount an intermediate whose CSR is
       signed by an offline root.
@@ -275,6 +286,25 @@ client.
 **Issuance fails with an OpenBao error mentioning the common name**
 The broker authorized it but the PKI role did not. Check the role's
 `allowed_domains` / `allow_subdomains` / `max_ttl`.
+
+**`SECURITY: issued certificate exceeds authorized constraints` in the logs, clients get 502**
+The PKI role issued a certificate broader than what the broker authorized, and
+the broker withheld it. This is a role misconfiguration, not a client problem —
+almost always `use_csr_sans` / `use_csr_common_name` left at their permissive
+defaults (see §6). The log line carries `authorized_cn`/`authorized_dns` versus
+`issued_cn`/`issued_dns` and the serial.
+
+The certificate **was already issued** before the check ran; revoke it:
+
+```bash
+bao write <mount>/revoke serial_number=<serial from the log>
+```
+
+Then fix the role:
+
+```bash
+bao write <mount>/roles/<role> use_csr_sans=false use_csr_common_name=false ...
+```
 
 ---
 

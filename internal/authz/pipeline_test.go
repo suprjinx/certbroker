@@ -274,3 +274,42 @@ func TestNoRoleDenied(t *testing.T) {
 		CSR:       csrFor("device01.example.com", nil),
 	})
 }
+
+// TestNoChallengeDoesNotSatisfyARequiredChallenge guards a fail-open trap:
+// NoChallenge accepts unconditionally, so wiring it in as the "none" backend
+// while a device (or global policy) demands a challengePassword would let every
+// request through the challenge stage with no secret at all. The pipeline's
+// contract is that a required challenge with no validator denies.
+func TestNoChallengeDoesNotSatisfyARequiredChallenge(t *testing.T) {
+	// Globally required.
+	p := basePipeline(NoInventory{}, nil, true, SANModeCSR)
+	d, err := p.Authorize(context.Background(), Request{
+		Operation: OpSimpleEnroll,
+		CSR:       csrFor("device01.example.com", nil),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Allow {
+		t.Fatal("a globally required challenge must deny when no validator is configured")
+	}
+
+	// Required by the inventory record rather than globally.
+	inv := &staticInventory{rec: Record{Found: true, RequireChallenge: true}}
+	p = basePipeline(inv, nil, false, SANModeCSR)
+	d, err = p.Authorize(context.Background(), Request{
+		Operation: OpSimpleEnroll,
+		CSR:       csrFor("device01.example.com", nil),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d.Allow {
+		t.Fatal("a per-device required challenge must deny when no validator is configured")
+	}
+}
+
+// staticInventory returns a fixed record for any identity.
+type staticInventory struct{ rec Record }
+
+func (s *staticInventory) Lookup(context.Context, Identity) (Record, error) { return s.rec, nil }

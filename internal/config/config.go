@@ -144,6 +144,11 @@ type Policy struct {
 	// of the proof-of-possession check, which runs before authorization.
 	MinRSABits int `yaml:"min_rsa_bits"`
 	MaxRSABits int `yaml:"max_rsa_bits"`
+	// ServerKeyGenKeyType/Bits select the key OpenBao generates for
+	// /serverkeygen. OpenBao refuses pki/issue when the role's key_type is
+	// "any" unless these are supplied, so they are set by default.
+	ServerKeyGenKeyType string `yaml:"serverkeygen_key_type"`
+	ServerKeyGenKeyBits int    `yaml:"serverkeygen_key_bits"`
 	// SANConstraint controls whether requested SANs must be derivable from the
 	// authenticated identity ("identity") or matched against allowlists ("allowlist").
 	SANConstraint string `yaml:"san_constraint"`
@@ -247,12 +252,14 @@ func Default() *Config {
 			},
 		},
 		Policy: Policy{
-			AllowedKeyTypes: []string{"rsa-2048", "rsa-3072", "rsa-4096", "ec-p256", "ec-p384"},
-			MaxValidity:     Duration(90 * 24 * time.Hour),
-			RequireCPP:      false,
-			SANConstraint:   "identity",
-			MinRSABits:      2048,
-			MaxRSABits:      8192,
+			AllowedKeyTypes:     []string{"rsa-2048", "rsa-3072", "rsa-4096", "ec-p256", "ec-p384"},
+			MaxValidity:         Duration(90 * 24 * time.Hour),
+			RequireCPP:          false,
+			SANConstraint:       "identity",
+			MinRSABits:          2048,
+			MaxRSABits:          8192,
+			ServerKeyGenKeyType: "rsa",
+			ServerKeyGenKeyBits: 2048,
 		},
 		Inventory: Inventory{Backend: "none"},
 		Challenge: Challenge{Backend: "none"},
@@ -299,6 +306,16 @@ func (c *Config) Validate() error {
 	}
 	if c.RoleMap.Default == "" && len(c.RoleMap.Rules) == 0 {
 		return fmt.Errorf("role_map must define a default role or at least one rule")
+	}
+	// Demanding a challengePassword with no backend able to check one denies
+	// every request at runtime. Fail at startup instead of at 3am.
+	if c.Policy.RequireCPP {
+		switch c.Challenge.Backend {
+		case "", "none":
+			return fmt.Errorf("policy.require_challenge_password is set but challenge.backend is %q; "+
+				"configure a challenge backend or the broker will deny every enrollment",
+				c.Challenge.Backend)
+		}
 	}
 	if c.Policy.MinRSABits > 0 && c.Policy.MaxRSABits > 0 && c.Policy.MinRSABits > c.Policy.MaxRSABits {
 		return fmt.Errorf("policy.min_rsa_bits (%d) exceeds policy.max_rsa_bits (%d)",

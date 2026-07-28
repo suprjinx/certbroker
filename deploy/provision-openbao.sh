@@ -61,12 +61,26 @@ fi
 echo "==> writing PKI role ${ROLE}"
 # max_ttl matches the broker's policy.max_validity. Both layers enforce it:
 # the broker constrains what it asks for, OpenBao caps what it will grant.
+#
+# use_csr_sans=false and use_csr_common_name=false are SECURITY-CRITICAL and are
+# NOT the OpenBao defaults. Left at their defaults (true), the CSR's own subject
+# and SANs are merged into the issued certificate alongside the parameters the
+# broker sends — so a device authorized for one name obtains any other name the
+# role's allowed_domains permits, just by putting it in the CSR. That silently
+# defeats the broker's entire constraint policy.
+#
+# The broker also verifies the returned certificate against what it authorized
+# (see internal/est/verify.go) and refuses to hand over an over-broad one, so a
+# role misconfigured this way fails closed and loudly rather than leaking. Both
+# layers are wanted: this one prevents the mis-issuance, that one detects it.
 bao write "${MOUNT}/roles/${ROLE}" \
   allowed_domains="example.com" \
   allow_subdomains=true \
   allow_bare_domains=false \
   allow_localhost=false \
   allow_ip_sans=false \
+  use_csr_common_name=false \
+  use_csr_sans=false \
   server_flag=true \
   client_flag=true \
   key_type=any \

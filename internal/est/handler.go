@@ -67,6 +67,11 @@ type Options struct {
 	// MinRSABits/MaxRSABits bound CSR RSA moduli; 0 uses the package defaults.
 	MinRSABits int
 	MaxRSABits int
+	// ServerKeyGenKeyType/Bits select the key OpenBao generates for
+	// /serverkeygen. Required when the PKI role's key_type is "any"; empty
+	// defers to the role.
+	ServerKeyGenKeyType string
+	ServerKeyGenKeyBits int
 	// UpstreamTimeout bounds a single OpenBao call; 0 uses defaultUpstreamTimeout.
 	// This is separate from the server's write timeout: an unresponsive OpenBao
 	// must not pin request goroutines (and their concurrency slots) indefinitely.
@@ -117,6 +122,35 @@ func (h *handler) upstreamCtx(r *http.Request) (context.Context, context.CancelF
 // parseCSR applies the handler's configured key bounds.
 func (h *handler) parseCSR(der []byte) (*x509.CertificateRequest, error) {
 	return ParseCSRLimited(der, h.opts.MinRSABits, h.opts.MaxRSABits)
+}
+
+// checkIssued validates a freshly issued certificate against the constraints
+// the authorizer approved, refusing to release it on any mismatch.
+//
+// A failure here is an operator-visible misconfiguration of the OpenBao role
+// (most likely use_csr_sans / use_csr_common_name left at their permissive
+// defaults), not a client error — hence the ERROR level. The certificate has
+// already been issued at this point, so the serial is logged for revocation.
+func (h *handler) checkIssued(certDER []byte, d authz.Decision, serial string) error {
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		h.logger.Error("issued certificate could not be parsed", "err", err)
+		return fmt.Errorf("parse issued certificate: %w", err)
+	}
+	if err := verifyIssued(cert, d.Constraints); err != nil {
+		h.logger.Error("SECURITY: issued certificate exceeds authorized constraints; withholding it",
+			"err", err,
+			"role", d.Role,
+			"serial", serial,
+			"authorized_cn", d.Constraints.CommonName,
+			"authorized_dns", d.Constraints.DNSNames,
+			"issued_cn", cert.Subject.CommonName,
+			"issued_dns", cert.DNSNames,
+			"hint", "check the OpenBao role's use_csr_sans and use_csr_common_name settings",
+		)
+		return err
+	}
+	return nil
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -255,6 +289,11 @@ func (h *handler) enroll(w http.ResponseWriter, r *http.Request, op authz.Operat
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
+	if err := h.checkIssued(leafDER, decision, bundle.SerialNumber); err != nil {
+		h.audit(op, req, decision, "constraint-violation", err)
+		http.Error(w, "issuance failed", http.StatusBadGateway)
+		return
+	}
 	p7, err := pkcs7.DegenerateCertsOnly(leafDER)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -316,7 +355,11 @@ func (h *handler) serverKeyGen(w http.ResponseWriter, r *http.Request, label str
 	ctx, cancel := h.upstreamCtx(r)
 	defer cancel()
 
-	bundle, err := h.opts.Enroller.Issue(ctx, decision.Role, decision.Constraints.CommonName, toSignOptions(decision.Constraints))
+	issueOpts := toSignOptions(decision.Constraints)
+	issueOpts.KeyType = h.opts.ServerKeyGenKeyType
+	issueOpts.KeyBits = h.opts.ServerKeyGenKeyBits
+
+	bundle, err := h.opts.Enroller.Issue(ctx, decision.Role, decision.Constraints.CommonName, issueOpts)
 	if err != nil {
 		h.audit(authz.OpServerKeyGen, req, decision, "issue-error", err)
 		http.Error(w, "issuance failed", http.StatusBadGateway)
@@ -335,6 +378,11 @@ func (h *handler) serverKeyGen(w http.ResponseWriter, r *http.Request, label str
 	certDER, err := singleCertDER(bundle.Certificate)
 	if err != nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if err := h.checkIssued(certDER, decision, bundle.SerialNumber); err != nil {
+		h.audit(authz.OpServerKeyGen, req, decision, "constraint-violation", err)
+		http.Error(w, "issuance failed", http.StatusBadGateway)
 		return
 	}
 	p7, err := pkcs7.DegenerateCertsOnly(certDER)

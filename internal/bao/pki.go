@@ -59,6 +59,12 @@ type SignOptions struct {
 	TTL string
 	// ExcludeCNFromSANs mirrors the OpenBao flag of the same name.
 	ExcludeCNFromSANs bool
+	// KeyType/KeyBits select the key OpenBao generates for Issue. They are
+	// required when the role's key_type is "any" — which is the useful setting
+	// for Sign, since it lets devices bring any policy-permitted key — and are
+	// ignored by Sign, where the key comes from the CSR.
+	KeyType string
+	KeyBits int
 	// Extra carries any additional role-permitted fields without a typed field here.
 	Extra map[string]any
 }
@@ -122,6 +128,13 @@ func (c *Client) Issue(ctx context.Context, role, commonName string, opts SignOp
 		body["common_name"] = commonName
 	}
 	opts.apply(body)
+	// Only meaningful here: pki/issue generates the key, pki/sign does not.
+	if opts.KeyType != "" {
+		body["key_type"] = opts.KeyType
+	}
+	if opts.KeyBits > 0 {
+		body["key_bits"] = opts.KeyBits
+	}
 
 	var out pkiData
 	path := fmt.Sprintf("v1/%s/issue/%s", c.cfg.PKIMount, url.PathEscape(role))

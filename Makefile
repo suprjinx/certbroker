@@ -4,6 +4,10 @@ BINARY  := certbroker
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
+# Where `make test-integration` finds the dev OpenBao. Override for another target.
+BAO_ADDR  ?= http://localhost:8200
+BAO_TOKEN ?= dev-root-token
+
 .DEFAULT_GOAL := help
 
 ## help: list targets
@@ -22,8 +26,10 @@ test:
 test-race:
 	go test -race ./...
 
-## test-integration: run tests that need a live OpenBao (see docs/runbook.md)
+## test-integration: run tests against the running dev stack (make dev-up first)
 test-integration:
+	CERTBROKER_TEST_OPENBAO_ADDR=$(BAO_ADDR) \
+	CERTBROKER_TEST_OPENBAO_TOKEN=$(BAO_TOKEN) \
 	go test -tags=integration -count=1 ./...
 
 ## cover: run tests and open a coverage summary
