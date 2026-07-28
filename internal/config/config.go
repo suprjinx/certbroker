@@ -128,10 +128,13 @@ type Policy struct {
 	SANConstraint string `yaml:"san_constraint"`
 }
 
-// Inventory configures the device-authorization backend; "file" is the reference.
+// Inventory configures the device-authorization backend. To add one (REST, DB),
+// implement authz.Inventory and give it a case in cmd/certbroker.buildInventory.
 type Inventory struct {
-	Backend string `yaml:"backend"` // "file" | "rest" | "db" | "none"
-	// File-backend options.
+	// Backend selects the implementation: "none" (default, permits every device)
+	// or "file". Anything else is rejected at startup.
+	Backend string `yaml:"backend"`
+	// Path is the "file" backend's YAML allowlist; required for that backend.
 	Path string `yaml:"path"`
 }
 
