@@ -1,6 +1,6 @@
 # certbroker
 
-A certificate enrollment broker. Devices enrol over **EST** (RFC 7030);
+A certificate enrollment broker. Devices enroll over **EST** (RFC 7030);
 certbroker decides whether each device may hold the certificate it is asking
 for, then forwards a constrained issuance request to **OpenBao**'s PKI mount.
 
