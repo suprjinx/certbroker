@@ -126,6 +126,9 @@ type Policy struct {
 	ServerKeyGenKeyBits int    `yaml:"serverkeygen_key_bits"`
 	// SANConstraint: "identity", "allowlist", or "csr" (dev only).
 	SANConstraint string `yaml:"san_constraint"`
+	// AllowUnauthenticatedEnrollment permits enrollment proving nothing — the
+	// inventory keys on a name the requester supplies, so it does not count.
+	AllowUnauthenticatedEnrollment bool `yaml:"allow_unauthenticated_enrollment"`
 }
 
 // Inventory configures the device-authorization backend. To add one (REST, DB),

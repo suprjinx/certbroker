@@ -77,9 +77,9 @@ Keep it that way — `config` in particular is a leaf and should stay one.
 This is the design's spine and spans several files. Protocol handlers **never**
 call OpenBao with attributes taken from a CSR. They build an `authz.Request`, ask
 an `Authorizer` for a `Decision`, and pass the decision's role and constraints to
-the issuer. `authz.Pipeline` is the production implementation and runs six stages
-— identity → reenroll-must-auth → inventory → challenge → role → constraints —
-every one of which must pass.
+the issuer. `authz.Pipeline` is the production implementation and runs seven
+stages — identity → reenroll-must-auth → inventory → challenge → authenticated?
+→ role → constraints — every one of which must pass.
 
 Adding a protocol (SCEP) means building an `authz.Request` and honoring the
 `Decision`; it does not mean touching the policy engine.
@@ -103,6 +103,9 @@ Breaking any of these is a security regression, not a style question:
   mode → deny.
 - **Never trust the CSR's subject/SANs.** Re-derive or constrain them from the
   authenticated identity and policy first.
+- **An inventory hit is not authentication.** It matches a CN the requester
+  supplied. Pipeline stage 5 requires a verified certificate or a validated
+  challenge; open enrollment needs `policy.allow_unauthenticated_enrollment`.
 - **Two enforcement layers.** The broker constrains what it *asks for*; the
   OpenBao role constrains what it will *grant*. Neither is the sole gate.
 - **RSA key size is checked before signature verification.** PoP is

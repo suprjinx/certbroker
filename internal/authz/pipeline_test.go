@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -35,13 +36,16 @@ func csrFor(cn string, dns []string) *x509.CertificateRequest {
 	}
 }
 
+// basePipeline opens the authentication gate: these tests exercise later stages
+// and would otherwise all stop there. The gate itself has its own test.
 func basePipeline(inv Inventory, ch ChallengeValidator, requireCh bool, mode string) *Pipeline {
 	return &Pipeline{
-		Inventory:        inv,
-		Challenge:        ch,
-		Roles:            NewRuleSelector(nil, "default-role"),
-		Constraints:      NewStandardConstraints(mode, time.Hour),
-		RequireChallenge: requireCh,
+		Inventory:            inv,
+		Challenge:            ch,
+		Roles:                NewRuleSelector(nil, "default-role"),
+		Constraints:          NewStandardConstraints(mode, time.Hour),
+		RequireChallenge:     requireCh,
+		AllowUnauthenticated: true,
 	}
 }
 
@@ -331,6 +335,84 @@ func TestCSRNamingNothingIsDenied(t *testing.T) {
 			}
 			if d.Allow {
 				t.Fatalf("a CSR naming nothing must be denied; got constraints %+v", d.Constraints)
+			}
+			if !strings.Contains(d.Reason, "names no subject") {
+				t.Fatalf("denied for the wrong reason: %q", d.Reason)
+			}
+		})
+	}
+}
+
+// TestUnauthenticatedEnrollmentGate: the inventory matches a CN the requester
+// supplies, so an inventory hit alone must not authorize issuance.
+func TestUnauthenticatedEnrollmentGate(t *testing.T) {
+	inv := func() Inventory {
+		return &staticInventory{rec: Record{
+			Found:           true,
+			AllowedDNSNames: []string{"device01.example.com"},
+		}}
+	}
+	secret, err := NewStaticSecret("s3cr3t")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name      string
+		pipeline  *Pipeline
+		challenge string
+		clientCN  string // non-empty ⇒ authenticated
+		wantAllow bool
+	}{
+		{
+			name:      "no cert, no challenge, gate closed",
+			pipeline:  &Pipeline{Inventory: inv(), Roles: NewRuleSelector(nil, "r"), Constraints: NewStandardConstraints(SANModeAllowlist, time.Hour)},
+			wantAllow: false,
+		},
+		{
+			name: "no cert, no challenge, gate opened by config",
+			pipeline: &Pipeline{Inventory: inv(), Roles: NewRuleSelector(nil, "r"),
+				Constraints: NewStandardConstraints(SANModeAllowlist, time.Hour), AllowUnauthenticated: true},
+			wantAllow: true,
+		},
+		{
+			name: "no cert but a valid challenge",
+			pipeline: &Pipeline{Inventory: inv(), Challenge: secret, Roles: NewRuleSelector(nil, "r"),
+				Constraints: NewStandardConstraints(SANModeAllowlist, time.Hour)},
+			challenge: "s3cr3t",
+			wantAllow: true,
+		},
+		{
+			// NoChallenge accepts an empty secret; that must not read as proof.
+			name: "no cert, empty challenge against a permissive validator",
+			pipeline: &Pipeline{Inventory: inv(), Challenge: NoChallenge{}, Roles: NewRuleSelector(nil, "r"),
+				Constraints: NewStandardConstraints(SANModeAllowlist, time.Hour)},
+			wantAllow: false,
+		},
+		{
+			name:      "authenticated by client certificate",
+			pipeline:  &Pipeline{Inventory: inv(), Roles: NewRuleSelector(nil, "r"), Constraints: NewStandardConstraints(SANModeAllowlist, time.Hour)},
+			clientCN:  "device01.example.com",
+			wantAllow: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := Request{
+				Operation:         OpSimpleEnroll,
+				CSR:               csrFor("device01.example.com", nil),
+				ChallengePassword: tc.challenge,
+			}
+			if tc.clientCN != "" {
+				req.ClientCert = certFor(tc.clientCN, []string{tc.clientCN})
+			}
+			d, err := tc.pipeline.Authorize(context.Background(), req)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if d.Allow != tc.wantAllow {
+				t.Fatalf("Allow = %v, want %v (reason %q)", d.Allow, tc.wantAllow, d.Reason)
 			}
 		})
 	}

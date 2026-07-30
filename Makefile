@@ -74,12 +74,16 @@ dev-down:
 dev-logs:
 	$(COMPOSE) logs -f certbroker
 
-## dev-enroll: run a real EST enrollment against the running stack
+## dev-enroll: run a real EST enrollment against the running stack (curl/openssl)
 dev-enroll:
 	./deploy/enroll.sh
+
+## dev-estclient: interop run against the stack using an independent EST client
+dev-estclient:
+	$(COMPOSE) run --rm --build -e EXPECT_OPEN estclient
 
 ## clean: remove build output and generated dev material
 clean:
 	rm -rf bin coverage.out deploy/pki
 
-.PHONY: help build test test-race test-integration cover vet fmt vuln check image certs dev-up dev-down dev-logs dev-enroll clean
+.PHONY: help build test test-race test-integration cover vet fmt vuln check image certs dev-up dev-down dev-logs dev-enroll dev-estclient clean

@@ -164,6 +164,33 @@ Verified end to end in `test/e2e` (`TestBootstrapCertCannotRenew`).
 **Residual.** A compromised device renews *itself* indefinitely. Containment is
 revocation plus inventory removal, both manual.
 
+### T14 — Authorization without authentication (A1)
+
+*An enrollment proves nothing and is authorized anyway.*
+
+`/simpleenroll` accepts a connection with no client certificate, because a
+bootstrapping device may not have one. The intended authenticator in that case
+is the challengePassword. Nothing originally enforced that: with no certificate,
+no challenge configured, and a file inventory carrying `allowed_dns`, the
+pipeline authorized on the strength of an inventory hit alone.
+
+That is authorization without authentication. The inventory matches on a CN the
+**requester supplies**; it answers "is this name permitted?" and never "are you
+that device?". Worse, the hole opened exactly when an operator did the thing the
+runbook recommends — configuring an inventory — while the `none` default
+happened to be safe.
+
+**Mitigation.** Pipeline stage 5 denies when there is neither a verified client
+certificate nor a validated non-empty challenge, unless
+`policy.allow_unauthenticated_enrollment` is explicitly set. Open enrollment
+remains supported for trusted provisioning networks, but is now a deliberate
+choice logged at WARN on startup. Covered by
+`authz.TestUnauthenticatedEnrollmentGate` and `make dev-estclient` step 7.
+
+**Residual.** With the flag set, anyone who can reach the listener may enrol any
+name the inventory and role permit. That is the intent of the mode; the network
+boundary becomes the control.
+
 ### T5 — Role escalation via unauthenticated selectors (A1, A4) — **known gap**
 
 *An unauthenticated enrollment steers itself to a more privileged PKI role.*
@@ -322,6 +349,7 @@ management interface; do not expose it beside `:8443`.
 | G9 | Empty-CN client certificates | Constraints pin an empty CN, so the CN check is skipped | Open; low impact |
 | G10 | No CT logging or issuance reconciliation | Mis-issuance is detected only at the moment it happens | Accepted for now |
 | G11 | OpenBao retries are not idempotency-aware | A network error after signing makes the retry issue a second certificate — constrained, but absent from the audit log | Open; fixing it means dropping retries on POST or tracking issuance out of band |
+| G12 | HTTP Basic (RFC 7030 §3.2.3) is not implemented | A client configured with only a username/password cannot enrol: the credential is not read, so the authentication gate refuses it. Fails closed, but the refusal reason will not mention the password | Mitigated by T14; implementing Basic against the challenge backend remains open |
 
 ---
 

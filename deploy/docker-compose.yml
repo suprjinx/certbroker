@@ -93,6 +93,24 @@ services:
         exit 1
     restart: "no"
 
+  # An independent RFC 7030 client (globalsign/est), standing in for a real
+  # network device. Vendor images (Cisco XRd, FortiGate-VM) are licensed and
+  # only downloadable from the vendor, so they cannot live in this stack.
+  #
+  # Behind a profile so `make dev-up` does not run it; use `make dev-estclient`.
+  estclient:
+    build:
+      context: ./estclient
+    profiles: ["interop"]
+    depends_on:
+      - certbroker
+    environment:
+      SERVER: certbroker:8443
+      CN: device01.example.com
+    volumes:
+      - ./pki:/pki:ro
+    restart: "no"
+
 volumes:
   # Carries provision output (AppRole SecretID, device CA) to the broker.
   shared:

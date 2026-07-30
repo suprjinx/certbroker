@@ -218,13 +218,21 @@ func selectAuthorizer(logger *slog.Logger, cfg *config.Config, devAllowAll bool,
 		"challenge", cfg.Challenge.Backend,
 		"require_challenge", cfg.Policy.RequireCPP,
 		"san_mode", cfg.Policy.SANConstraint,
+		"allow_unauthenticated", cfg.Policy.AllowUnauthenticatedEnrollment,
 	)
+	if cfg.Policy.AllowUnauthenticatedEnrollment {
+		// Supported, but it means anyone who can reach the listener may enroll any
+		// name the inventory and role permit. Say so once, loudly, at startup.
+		logger.Warn("SECURITY: allow_unauthenticated_enrollment is set; enrollment does not require a client certificate or a challenge",
+			"inventory", cfg.Inventory.Backend)
+	}
 	return &authz.Pipeline{
-		Inventory:        inv,
-		Challenge:        ch,
-		Roles:            authz.NewRuleSelector(rules, cfg.RoleMap.Default),
-		Constraints:      authz.NewStandardConstraints(cfg.Policy.SANConstraint, cfg.Policy.MaxValidity.Std()),
-		RequireChallenge: cfg.Policy.RequireCPP,
+		Inventory:            inv,
+		Challenge:            ch,
+		Roles:                authz.NewRuleSelector(rules, cfg.RoleMap.Default),
+		Constraints:          authz.NewStandardConstraints(cfg.Policy.SANConstraint, cfg.Policy.MaxValidity.Std()),
+		RequireChallenge:     cfg.Policy.RequireCPP,
+		AllowUnauthenticated: cfg.Policy.AllowUnauthenticatedEnrollment,
 	}, nil
 }
 

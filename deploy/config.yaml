@@ -52,6 +52,10 @@ policy:
   # "identity" pins issued names to the authenticated cert, falling back to the
   # inventory allowlist for unauthenticated bootstrap.
   san_constraint: identity
+  # Enrollment must prove something: a client certificate or a challengePassword.
+  # Setting this true permits open enrollment — anyone who can reach the listener
+  # may enroll any name the inventory and role allow. Logged loudly at startup.
+  allow_unauthenticated_enrollment: false
 
 inventory:
   backend: file

@@ -197,6 +197,11 @@ through this list:
       an incident.
 - [ ] **Inventory backend configured.** `backend: none` permits every device
       that clears the other gates.
+- [ ] **`allow_unauthenticated_enrollment` left false** unless open enrollment
+      is genuinely wanted. With it set, any host that can reach the listener may
+      enrol any name the inventory and role allow — the network boundary becomes
+      the only control. It logs a WARN at startup; treat that line as a
+      deliberate decision, and confirm it was one.
 - [ ] **Challenge backend for unauthenticated bootstrap.** If devices enroll
       without a bootstrap client cert, the challengePassword is the only thing
       authenticating them. Prefer single-use OTPs over a fleet-wide static
@@ -262,8 +267,11 @@ confirm the `provision` service exited successfully.
 Work down the pipeline in order — it fails closed at the first gap:
 1. Is the device in the inventory? (`reason: device not permitted by inventory`)
 2. Is a challenge required with no validator configured?
-3. Does any rule or `role_map.default` yield a role? (`reason: no OpenBao role for identity`)
-4. Does the constraint policy reject the requested names?
+3. Did anything authenticate the request? (`reason: unauthenticated: no client
+   certificate and no validated challenge`) — a client certificate that does not
+   chain to the bootstrap anchor is ignored, not rejected, so it lands here
+4. Does any rule or `role_map.default` yield a role? (`reason: no OpenBao role for identity`)
+5. Does the constraint policy reject the requested names?
 
 The `reason` field names the stage.
 
@@ -307,7 +315,45 @@ bao write <mount>/roles/<role> use_csr_sans=false use_csr_common_name=false ...
 
 ---
 
-## 9. CI
+## 9. EST client interop
+
+`make dev-estclient` runs [globalsign/est](https://github.com/globalsign/est)'s
+`estclient` against the running stack, in a container. It is a *different*
+implementation from ours, unlike `deploy/enroll.sh`, which drives the broker with
+curl and openssl and therefore shares our assumptions about the wire format.
+
+It walks cacerts → enroll → reenroll, then checks that a bootstrap certificate
+cannot renew, an uninventoried CN is refused, and reports what happens when a
+client presents only HTTP Basic credentials.
+
+Failures are asserted on the authorization decision, not merely on a non-zero
+exit: the negative steps explicitly distinguish a 403 from a 429, because the
+per-client rate limiter will otherwise make them pass for the wrong reason.
+
+### Why not a real vendor image
+
+Cisco XRd and FortiGate-VM would be closer stand-ins, but neither can live in a
+self-contained stack: both are licensed images distributed only to entitled
+accounts (XRd as a tarball from software.cisco.com, gated behind a license
+acceptance). If you have an entitlement, point the appliance at
+`https://<host>:8443/.well-known/est` and it should behave as step 3–4 do —
+but read §10 first, because vendor clients differ from `estclient` in ways that
+matter.
+
+### Known client incompatibilities
+
+| Client behaviour | Effect here |
+|---|---|
+| HTTP Basic auth (`username`/`password`) | Not read. The request counts as unauthenticated, so the authentication gate refuses it unless `allow_unauthenticated_enrollment` is set. Fails closed, but the error will not mention the password |
+| No challengePassword support (Aruba AOS-CX cannot send one) | `require_challenge_password` and per-device `require_challenge` make those devices permanently undeployable |
+| ECDSA P-521 (Aruba's documented default example) | Rejected — not in the default `policy.allowed_key_types`. Add `ec-p521` |
+| Full subject DN (C/ST/L/O/OU) with no SANs | Only the CN survives; the rest is dropped unless the OpenBao role sets it |
+| Re-enrollment falling back to bootstrap on failure (AOS-CX) | The bootstrap credential must stay valid and inventoried for the device's whole life — so it cannot be a single-use OTP, and the device cannot be removed from inventory after first enrollment |
+| A client cert that does not chain to the bootstrap anchor | Logged and **ignored**, not rejected; the request degrades to anonymous (threat-model T6) |
+
+---
+
+## 10. CI
 
 `make check` runs `fmt`, `vet`, and unit tests — the gate for every change.
 `make test-race` and `make vuln` (govulncheck) are worth running before a

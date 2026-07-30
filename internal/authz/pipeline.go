@@ -3,13 +3,16 @@ package authz
 import "context"
 
 // Pipeline is the production Authorizer: identity → reenroll-must-auth →
-// inventory → challenge → role → constraints. Any gap denies (fail closed).
+// inventory → challenge → authenticated? → role → constraints. Any gap denies.
 type Pipeline struct {
 	Inventory        Inventory          // nil ⇒ NoInventory (all devices permitted)
 	Challenge        ChallengeValidator // nil ⇒ no validator (required challenges deny)
 	Roles            RoleSelector       // required
 	Constraints      ConstraintBuilder  // required
 	RequireChallenge bool               // global: force challenge validation
+	// AllowUnauthenticated permits enrollment proving nothing. Off by default;
+	// see the authentication gate in Authorize for why the inventory is not proof.
+	AllowUnauthenticated bool
 }
 
 // Authorize implements Authorizer.
@@ -35,7 +38,9 @@ func (p *Pipeline) Authorize(ctx context.Context, req Request) (Decision, error)
 		return Deny("device not permitted by inventory"), nil
 	}
 
-	// (4) Challenge password.
+	// (4) Challenge. challengeValidated needs a NON-EMPTY secret: an empty one
+	// proves nothing even where a permissive validator accepts it.
+	challengeValidated := false
 	challengeRequired := p.RequireChallenge || rec.RequireChallenge
 	if challengeRequired {
 		if p.Challenge == nil {
@@ -44,15 +49,23 @@ func (p *Pipeline) Authorize(ctx context.Context, req Request) (Decision, error)
 		if err := p.Challenge.Validate(ctx, id, req.ChallengePassword); err != nil {
 			return Deny("challenge validation failed"), nil
 		}
+		challengeValidated = req.ChallengePassword != ""
 	} else if req.ChallengePassword != "" && p.Challenge != nil {
 		// A supplied-but-not-required challenge is still validated, so a wrong
 		// secret is a hard failure rather than being silently ignored.
 		if err := p.Challenge.Validate(ctx, id, req.ChallengePassword); err != nil {
 			return Deny("challenge validation failed"), nil
 		}
+		challengeValidated = true
 	}
 
-	// (5) Role selection.
+	// (5) Authentication gate. The inventory matched a name the REQUESTER chose —
+	// "is this name permitted?", never "are you that device?". See T14.
+	if !id.Authenticated && !challengeValidated && !p.AllowUnauthenticated {
+		return Deny("unauthenticated: no client certificate and no validated challenge"), nil
+	}
+
+	// (6) Role selection.
 	role := rec.Role
 	if role == "" && p.Roles != nil {
 		role = p.Roles.Role(id)
@@ -61,7 +74,7 @@ func (p *Pipeline) Authorize(ctx context.Context, req Request) (Decision, error)
 		return Deny("no OpenBao role for identity"), nil
 	}
 
-	// (6) Constraint policy.
+	// (7) Constraint policy.
 	if p.Constraints == nil {
 		return Deny("no constraint policy configured"), nil
 	}

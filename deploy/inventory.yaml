@@ -14,18 +14,21 @@ devices:
     allowed_dns:
       - device01.example.com
 
-  # A glob covering a fleet. Broad globs are convenient and are exactly how an
-  # inventory stops being a meaningful gate — prefer per-device entries, or at
-  # minimum keep allowed_dns tight so a matched device still cannot request an
-  # arbitrary name.
-  - cn: "device*.example.com"
+  # A glob covering a fleet. Patterns support only "*" (anything) and
+  # "*.suffix" — a mid-string wildcard such as "device*.example.com" is NOT a
+  # glob and is compared literally, so it matches nothing.
+  #
+  # Broad globs are also how an inventory stops being a meaningful gate: prefer
+  # per-device entries, and keep allowed_dns tight so a matched device still
+  # cannot request an arbitrary name.
+  - cn: "*.example.com"
     allowed_dns:
-      - "device*.example.com"
+      - "*.example.com"
 
   # An entry that additionally demands a challengePassword. Requires a challenge
   # backend to be configured, otherwise the pipeline denies (fail closed).
-  # - cn: "sensitive*.example.com"
+  # - cn: sensitive01.example.com
   #   require_challenge: true
   #   allowed_dns:
-  #     - "sensitive*.example.com"
+  #     - sensitive01.example.com
   #   role: high-assurance-role
