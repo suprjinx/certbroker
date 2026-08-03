@@ -58,7 +58,22 @@ EOF
 openssl x509 -req -in device01.csr -CA bootstrap-ca.pem -CAkey bootstrap-ca.key \
   -CAcreateserial -out device01.pem -days 825 -sha256 -extfile device01.ext 2>/dev/null
 
-rm -f server.csr server.ext device01.csr device01.ext
+echo "==> generating the SCEP RA cert (CN=certbroker RA)"
+# RSA, not EC: SCEP clients do RSA key transport, so the RA key must be able to
+# decrypt the request envelope.
+openssl req -newkey rsa:2048 -nodes \
+  -keyout scep-ra.key -out scep-ra.csr \
+  -subj "/CN=certbroker RA" 2>/dev/null
+
+cat > scep-ra.ext <<'EOF'
+basicConstraints=CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+EOF
+
+openssl x509 -req -in scep-ra.csr -CA bootstrap-ca.pem -CAkey bootstrap-ca.key \
+  -CAcreateserial -out scep-ra.pem -days 825 -sha256 -extfile scep-ra.ext 2>/dev/null
+
+rm -f server.csr server.ext device01.csr device01.ext scep-ra.csr scep-ra.ext
 
 chmod 644 ./*.pem
 chmod 600 ./*.key
@@ -68,7 +83,7 @@ chmod 600 ./*.key
 # the host user can read makes the container fail to start. Widening it is
 # acceptable for throwaway dev material and is why this script is dev-only; a
 # real deployment injects the key as a secret owned by the runtime uid instead.
-chmod 644 server.key
+chmod 644 server.key scep-ra.key
 
 echo
 echo "wrote:"

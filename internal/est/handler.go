@@ -127,7 +127,7 @@ func (h *handler) checkIssued(certDER []byte, d authz.Decision, serial string) e
 		h.logger.Error("issued certificate could not be parsed", "err", err)
 		return fmt.Errorf("parse issued certificate: %w", err)
 	}
-	if err := verifyIssued(cert, d.Constraints); err != nil {
+	if err := authz.VerifyIssued(cert, d.Constraints); err != nil {
 		h.logger.Error("SECURITY: issued certificate exceeds authorized constraints; withholding it",
 			"err", err,
 			"role", d.Role,

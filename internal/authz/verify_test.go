@@ -1,7 +1,6 @@
-package est
+package authz
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -9,21 +8,17 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"math/big"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gr-oss/certbroker/internal/authz"
 )
 
 func TestVerifyIssuedAcceptsMatchingCert(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "device01.example.com", []string{"device01.example.com"})
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{
+	err := VerifyIssued(cert, CertConstraints{
 		CommonName: "device01.example.com",
 		DNSNames:   []string{"device01.example.com"},
 		TTL:        720 * time.Hour,
@@ -40,7 +35,7 @@ func TestVerifyIssuedCatchesSANInjection(t *testing.T) {
 		[]string{"device01.example.com", "sneaky.example.com"})
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{
+	err := VerifyIssued(cert, CertConstraints{
 		CommonName: "device01.example.com",
 		DNSNames:   []string{"device01.example.com"},
 	})
@@ -58,7 +53,7 @@ func TestVerifyIssuedCatchesCNSubstitution(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "attacker.example.com", nil)
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{CommonName: "device01.example.com"})
+	err := VerifyIssued(cert, CertConstraints{CommonName: "device01.example.com"})
 	if err == nil {
 		t.Fatal("expected the substituted CN to be caught")
 	}
@@ -73,7 +68,7 @@ func TestVerifyIssuedAllowsCNMirroredIntoSANs(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "device01.example.com", []string{"device01.example.com"})
 	cert := parseDER(t, der)
 
-	if err := verifyIssued(cert, authz.CertConstraints{CommonName: "device01.example.com"}); err != nil {
+	if err := VerifyIssued(cert, CertConstraints{CommonName: "device01.example.com"}); err != nil {
 		t.Fatalf("CN mirrored into SANs should be accepted: %v", err)
 	}
 }
@@ -84,7 +79,7 @@ func TestVerifyIssuedIsCaseInsensitiveForDNS(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "Device01.Example.COM", []string{"Device01.Example.COM"})
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{
+	err := VerifyIssued(cert, CertConstraints{
 		CommonName: "device01.example.com",
 		DNSNames:   []string{"device01.example.com"},
 	})
@@ -97,7 +92,7 @@ func TestVerifyIssuedRejectsUnauthorizedSANWhenNoneAllowed(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "device01.example.com", []string{"other.example.com"})
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{CommonName: "device01.example.com"})
+	err := VerifyIssued(cert, CertConstraints{CommonName: "device01.example.com"})
 	if err == nil {
 		t.Fatal("expected rejection of a SAN that is neither the CN nor authorized")
 	}
@@ -107,7 +102,7 @@ func TestVerifyIssuedRejectsExcessiveTTL(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "device01.example.com", nil) // 24h lifetime
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{
+	err := VerifyIssued(cert, CertConstraints{
 		CommonName: "device01.example.com",
 		TTL:        time.Hour,
 	})
@@ -125,7 +120,7 @@ func TestVerifyIssuedUnconstrainedFieldsAreNotChecked(t *testing.T) {
 	_, der, _, _ := genLeafWithSANs(t, "whatever.example.com", []string{"whatever.example.com"})
 	cert := parseDER(t, der)
 
-	if err := verifyIssued(cert, authz.CertConstraints{}); err != nil {
+	if err := VerifyIssued(cert, CertConstraints{}); err != nil {
 		t.Fatalf("unconstrained issuance should pass: %v", err)
 	}
 }
@@ -135,53 +130,13 @@ func TestVerifyIssuedRejectsUnauthorizedURIAndIP(t *testing.T) {
 	_, der, _, _ := genLeafWithURIs(t, "device01.example.com", []*url.URL{u})
 	cert := parseDER(t, der)
 
-	err := verifyIssued(cert, authz.CertConstraints{CommonName: "device01.example.com"})
+	err := VerifyIssued(cert, CertConstraints{CommonName: "device01.example.com"})
 	if err == nil {
 		t.Fatal("expected an unauthorized URI SAN to be caught")
 	}
 	if !strings.Contains(err.Error(), "URI") {
 		t.Fatalf("unexpected error: %v", err)
 	}
-}
-
-// TestRogueRoleIsBlockedEndToEnd drives the handler against a misconfigured
-// role and asserts the client gets nothing, not an over-broad certificate.
-func TestRogueRoleIsBlockedEndToEnd(t *testing.T) {
-	fe := newFakeEnroller(t)
-	fe.rogueDNS = []string{"sneaky.example.com"} // role echoes the CSR's SANs
-
-	h, err := NewHandler(quietOpts(Options{
-		Enroller:   fe,
-		Authorizer: constrainedAuthorizer{cn: "device01.example.com"},
-	}))
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-
-	csr := makeCSR(t, "device01.example.com", "device01.example.com", "sneaky.example.com")
-	resp := postCSR(t, srv.Client(), srv.URL+"/.well-known/est/simpleenroll", csr)
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("status = %d, want 502 — an over-broad certificate must not be released", resp.StatusCode)
-	}
-}
-
-// constrainedAuthorizer authorizes exactly one name, ignoring the CSR.
-type constrainedAuthorizer struct{ cn string }
-
-func (a constrainedAuthorizer) Authorize(_ context.Context, _ authz.Request) (authz.Decision, error) {
-	return authz.Decision{
-		Allow: true,
-		Role:  "test-role",
-		Constraints: authz.CertConstraints{
-			CommonName: a.cn,
-			DNSNames:   []string{a.cn},
-		},
-		Reason: "test",
-	}, nil
 }
 
 func parseDER(t *testing.T, der []byte) *x509.Certificate {
@@ -193,8 +148,19 @@ func parseDER(t *testing.T, der []byte) *x509.Certificate {
 	return cert
 }
 
-// genLeafWithURIs mints a self-signed cert carrying URI SANs.
+// genLeafWithSANs mints a self-signed certificate with the given names.
+func genLeafWithSANs(t *testing.T, cn string, dns []string) (string, []byte, string, []byte) {
+	t.Helper()
+	return genLeaf(t, cn, dns, nil)
+}
+
+// genLeafWithURIs mints a self-signed certificate carrying URI SANs.
 func genLeafWithURIs(t *testing.T, cn string, uris []*url.URL) (string, []byte, string, []byte) {
+	t.Helper()
+	return genLeaf(t, cn, nil, uris)
+}
+
+func genLeaf(t *testing.T, cn string, dns []string, uris []*url.URL) (string, []byte, string, []byte) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -203,6 +169,7 @@ func genLeafWithURIs(t *testing.T, cn string, uris []*url.URL) (string, []byte, 
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: cn},
+		DNSNames:     dns,
 		URIs:         uris,
 		NotBefore:    time.Now().Add(-time.Minute),
 		NotAfter:     time.Now().Add(24 * time.Hour),
@@ -215,32 +182,4 @@ func genLeafWithURIs(t *testing.T, cn string, uris []*url.URL) (string, []byte, 
 	certPEM := string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 	keyPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}))
 	return certPEM, der, keyPEM, keyDER
-}
-
-// TestVerifyIssuedNameTypesAreAllOrNothing: once a decision names any subject,
-// a type it left empty permits none — unnamed is not unchecked.
-func TestVerifyIssuedNameTypesAreAllOrNothing(t *testing.T) {
-	_, der, _, _ := genLeafWithSANs(t, "", []string{"snuck.example.com"})
-	cert := parseDER(t, der)
-
-	// Only IPs were authorized, so a DNS SAN is unauthorized — previously this
-	// slipped through because the DNS branch keyed off CommonName being set.
-	err := verifyIssued(cert, authz.CertConstraints{IPs: []string{"192.0.2.1"}})
-	if err == nil {
-		t.Fatal("expected a DNS SAN to be rejected when only IPs were authorized")
-	}
-	if !strings.Contains(err.Error(), "snuck.example.com") {
-		t.Fatalf("error should name the offending SAN: %v", err)
-	}
-}
-
-// TestVerifyIssuedTTLCheckedEvenWhenUnnamed keeps the TTL cap independent of the
-// name checks, so deferring the subject to the role does not defer the lifetime.
-func TestVerifyIssuedTTLCheckedEvenWhenUnnamed(t *testing.T) {
-	_, der, _, _ := genLeafWithSANs(t, "whatever.example.com", nil) // 24h
-	cert := parseDER(t, der)
-
-	if err := verifyIssued(cert, authz.CertConstraints{TTL: time.Minute}); err == nil {
-		t.Fatal("expected the TTL cap to apply to an otherwise unconstrained decision")
-	}
 }

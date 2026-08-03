@@ -1,4 +1,4 @@
-package est
+package authz
 
 import (
 	"crypto/x509"
@@ -6,16 +6,14 @@ import (
 	"fmt"
 	"net"
 	"time"
-
-	"github.com/gr-oss/certbroker/internal/authz"
 )
 
 // ttlSlack absorbs OpenBao's NotBefore backdating plus clock skew.
 const ttlSlack = time.Hour
 
-// verifyIssued checks the issued cert against what was approved. Names are
+// VerifyIssued checks the issued cert against what was approved. Names are
 // all-or-nothing (see namesConstrained); the TTL cap applies regardless.
-func verifyIssued(cert *x509.Certificate, c authz.CertConstraints) error {
+func VerifyIssued(cert *x509.Certificate, c CertConstraints) error {
 	if cert == nil {
 		return errors.New("no certificate to verify")
 	}
@@ -35,11 +33,11 @@ func verifyIssued(cert *x509.Certificate, c authz.CertConstraints) error {
 }
 
 // namesConstrained reports whether the decision bounded the subject at all.
-func namesConstrained(c authz.CertConstraints) bool {
+func namesConstrained(c CertConstraints) bool {
 	return c.CommonName != "" || len(c.DNSNames) > 0 || len(c.IPs) > 0 || len(c.URIs) > 0
 }
 
-func verifyNames(cert *x509.Certificate, c authz.CertConstraints) error {
+func verifyNames(cert *x509.Certificate, c CertConstraints) error {
 	// Case-insensitive like the SANs: a CN carrying a hostname is a DNS name, and
 	// a CA that normalizes its case has not issued a different name.
 	if c.CommonName != "" && !equalFoldASCII(cert.Subject.CommonName, c.CommonName) {

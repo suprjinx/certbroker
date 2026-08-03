@@ -62,7 +62,23 @@ inventory:
   path: /etc/certbroker/inventory.yaml
 
 challenge:
-  backend: none
+  backend: static
+  static_secret_env: CERTBROKER_CHALLENGE_SECRET
+
+# SCEP (RFC 8894). Disabled by default; enable to run the SCEP interop client.
+#
+# Plain HTTP by design — the protocol carries its own CMS signing and
+# encryption — so bind it to a trusted network. Unlike EST there is no mTLS,
+# and a PKCSReq signer is self-signed, so the challengePassword is the only
+# thing authenticating a bootstrap enrollment.
+scep:
+  enabled: true
+  listen_addr: ":8080"
+  ra_cert_file: /etc/certbroker/pki/scep-ra.pem
+  ra_key_file: /etc/certbroker/pki/scep-ra.key
+  allow_sha1: false
+  replay_ttl: 15m
+  replay_max_entries: 100000
 
 limits:
   per_client_rate: 1

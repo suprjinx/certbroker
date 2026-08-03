@@ -4,6 +4,8 @@ package config
 
 import (
 	"bytes"
+	"crypto"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -24,7 +26,32 @@ type Config struct {
 	Inventory Inventory `yaml:"inventory"`
 	Challenge Challenge `yaml:"challenge"`
 	Limits    Limits    `yaml:"limits"`
+	SCEP      SCEP      `yaml:"scep"`
 	Audit     Audit     `yaml:"audit"`
+}
+
+// SCEP configures the optional SCEP listener (RFC 8894). Disabled by default.
+//
+// SCEP is plain HTTP by design — the protocol carries its own CMS signing and
+// encryption — so the listener must be bound to a trusted network.
+type SCEP struct {
+	Enabled bool `yaml:"enabled"`
+	// ListenAddr is the plain-HTTP SCEP listener, e.g. ":8080".
+	ListenAddr string `yaml:"listen_addr"`
+	// RACertFile and RAKeyFile are the broker's own RSA identity: requests are
+	// encrypted to this certificate and responses signed by this key. Unlike
+	// EST, SCEP requires the broker to hold a key at rest.
+	RACertFile string `yaml:"ra_cert_file"`
+	RAKeyFile  string `yaml:"ra_key_file"`
+	// AllowSHA1 re-admits SHA-1 for clients too old to do better. Off by
+	// default; turning it on is a recorded decision, not a convenience.
+	AllowSHA1 bool `yaml:"allow_sha1"`
+	// MaxRequestBytes bounds a PKIOperation body (0 = handler default).
+	MaxRequestBytes int64 `yaml:"max_request_bytes"`
+	// ReplayTTL is how long a transactionID/senderNonce pair stays un-replayable.
+	ReplayTTL Duration `yaml:"replay_ttl"`
+	// ReplayMaxEntries caps the replay table.
+	ReplayMaxEntries int `yaml:"replay_max_entries"`
 }
 
 // Server configures the in-app TLS/mTLS listener; TLS terminates here so client
@@ -237,6 +264,12 @@ func Default() *Config {
 			ServerKeyGenKeyType: "rsa",
 			ServerKeyGenKeyBits: 2048,
 		},
+		SCEP: SCEP{
+			Enabled:          false,
+			ListenAddr:       ":8080",
+			ReplayTTL:        Duration(15 * time.Minute),
+			ReplayMaxEntries: 100_000,
+		},
 		Inventory: Inventory{Backend: "none"},
 		Challenge: Challenge{Backend: "none"},
 		Limits: Limits{
@@ -289,6 +322,21 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("policy.require_challenge_password is set but challenge.backend is %q; "+
 				"configure a challenge backend or the broker will deny every enrollment",
 				c.Challenge.Backend)
+		}
+	}
+	if c.SCEP.Enabled {
+		if c.SCEP.RACertFile == "" || c.SCEP.RAKeyFile == "" {
+			return fmt.Errorf("scep.ra_cert_file and scep.ra_key_file are required when SCEP is enabled")
+		}
+		// SCEP's only bootstrap authenticator is the challengePassword: its
+		// signer is self-signed and there is no mTLS. Without a challenge
+		// backend, enrollment would rest on the inventory alone.
+		switch c.Challenge.Backend {
+		case "", "none":
+			if !c.Policy.AllowUnauthenticatedEnrollment {
+				return fmt.Errorf("scep.enabled requires a challenge backend (or policy.allow_unauthenticated_enrollment): " +
+					"a SCEP PKCSReq signer is self-signed and authenticates nothing")
+			}
 		}
 	}
 	if c.Policy.MinRSABits > 0 && c.Policy.MaxRSABits > 0 && c.Policy.MinRSABits > c.Policy.MaxRSABits {
@@ -369,4 +417,22 @@ func poolFromFile(path string) (*x509.CertPool, error) {
 		return nil, fmt.Errorf("no certificates found in %s", path)
 	}
 	return pool, nil
+}
+
+// SCEPRAIdentity loads the RA certificate and key used to decrypt SCEP requests
+// and sign responses. The key must be RSA: SCEP clients do RSA key transport,
+// so an EC key cannot decrypt the envelope.
+func (c *Config) SCEPRAIdentity() (*x509.Certificate, crypto.PrivateKey, error) {
+	pair, err := tls.LoadX509KeyPair(c.SCEP.RACertFile, c.SCEP.RAKeyFile)
+	if err != nil {
+		return nil, nil, fmt.Errorf("scep RA identity: %w", err)
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return nil, nil, fmt.Errorf("scep RA certificate: %w", err)
+	}
+	if _, ok := pair.PrivateKey.(*rsa.PrivateKey); !ok {
+		return nil, nil, fmt.Errorf("scep RA key must be RSA, got %T", pair.PrivateKey)
+	}
+	return leaf, pair.PrivateKey, nil
 }

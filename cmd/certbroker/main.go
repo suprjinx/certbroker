@@ -4,6 +4,8 @@ package main
 
 import (
 	"context"
+	"crypto/x509"
+	"encoding/asn1"
 	"errors"
 	"flag"
 	"log/slog"
@@ -15,9 +17,11 @@ import (
 
 	"github.com/gr-oss/certbroker/internal/authz"
 	"github.com/gr-oss/certbroker/internal/bao"
+	"github.com/gr-oss/certbroker/internal/cms"
 	"github.com/gr-oss/certbroker/internal/config"
 	"github.com/gr-oss/certbroker/internal/est"
 	"github.com/gr-oss/certbroker/internal/limits"
+	"github.com/gr-oss/certbroker/internal/scep"
 )
 
 func main() {
@@ -145,7 +149,16 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
 	}
 
-	errCh := make(chan error, 2)
+	// --- optional SCEP listener ---
+	var scepSrv *http.Server
+	if cfg.SCEP.Enabled {
+		scepSrv, err = buildSCEPServer(logger, cfg, baoClient, authorizer, deviceRoots, limiter)
+		if err != nil {
+			return err
+		}
+	}
+
+	errCh := make(chan error, 3)
 	go func() {
 		logger.Info("EST listener starting", "addr", cfg.Server.ListenAddr)
 		// Certs come from TLSConfig, so the file args are empty.
@@ -159,6 +172,15 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 			errCh <- err
 		}
 	}()
+
+	if scepSrv != nil {
+		go func() {
+			logger.Info("SCEP listener starting", "addr", cfg.SCEP.ListenAddr)
+			if err := scepSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- err
+			}
+		}()
+	}
 
 	// --- wait for signal or server error ---
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -179,8 +201,72 @@ func run(logger *slog.Logger, configPath string, devAllowAll bool, devRole strin
 	defer cancel()
 	_ = estSrv.Shutdown(shutdownCtx)
 	_ = healthSrv.Shutdown(shutdownCtx)
+	if scepSrv != nil {
+		_ = scepSrv.Shutdown(shutdownCtx)
+	}
 	logger.Info("certbroker stopped")
 	return nil
+}
+
+// buildSCEPServer assembles the SCEP listener. It shares the authorization
+// pipeline, issuer, and rate limiter with EST — only the protocol differs.
+func buildSCEPServer(logger *slog.Logger, cfg *config.Config, baoClient *bao.Client,
+	authorizer authz.Authorizer, deviceRoots *x509.CertPool, limiter *limits.Limiter) (*http.Server, error) {
+
+	raCert, raKey, err := cfg.SCEPRAIdentity()
+	if err != nil {
+		return nil, err
+	}
+
+	digests := cms.DefaultDigests
+	if cfg.SCEP.AllowSHA1 {
+		digests = append([]asn1.ObjectIdentifier{cms.SHA1}, digests...)
+		logger.Warn("SECURITY: scep.allow_sha1 is set; SHA-1 is collision-broken and accepted only for legacy clients")
+	}
+
+	handler, err := scep.NewHandler(scep.Options{
+		RACert:      raCert,
+		RAKey:       raKey,
+		DeviceRoots: deviceRoots,
+		Enroller:    baoClient,
+		Authorizer:  authorizer,
+		ParseCSR: func(der []byte) (*x509.CertificateRequest, error) {
+			return est.ParseCSRLimited(der, cfg.Policy.MinRSABits, cfg.Policy.MaxRSABits)
+		},
+		ChallengePassword: est.ChallengePassword,
+		VerifyIssued:      authz.VerifyIssued,
+		Digests:           digests,
+		ReplayCache: scep.NewReplayCache(
+			cfg.SCEP.ReplayTTL.Std(), cfg.SCEP.ReplayMaxEntries),
+		MaxRequestBytes: cfg.SCEP.MaxRequestBytes,
+		UpstreamTimeout: cfg.Limits.UpstreamTimeout.Std(),
+		Logger:          logger,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	logger.Info("SCEP enabled",
+		"addr", cfg.SCEP.ListenAddr,
+		"ra_subject", raCert.Subject.CommonName,
+		"allow_sha1", cfg.SCEP.AllowSHA1,
+	)
+	// Plain HTTP by design: SCEP carries its own signing and encryption. Bind it
+	// to a trusted network — there is no transport authentication here.
+	logger.Warn("SCEP listener is plain HTTP; bind it to a trusted network")
+
+	return &http.Server{
+		Addr: cfg.SCEP.ListenAddr,
+		// Same limiter as EST: SCEP's unauthenticated RSA decrypt is strictly
+		// more expensive than EST's proof-of-possession check.
+		Handler:           limiter.Middleware(handler),
+		ReadTimeout:       cfg.Server.ReadTimeout.Std(),
+		ReadHeaderTimeout: cfg.Server.ReadHeaderTimeout.Std(),
+		WriteTimeout:      cfg.Server.WriteTimeout.Std(),
+		IdleTimeout:       cfg.Server.IdleTimeout.Std(),
+		MaxHeaderBytes:    cfg.Server.MaxHeaderBytes,
+		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}, nil
 }
 
 // selectAuthorizer builds the pipeline from config; -dev-insecure-allow-all
