@@ -16,9 +16,8 @@ type Request struct {
 	CSR *x509.CertificateRequest
 	// Signer is the certificate that signed the outer SignedData.
 	Signer *x509.Certificate
-	// SignerAuthenticated is true ONLY when Signer verified against the device
-	// trust anchor — a RenewalReq. For a PKCSReq it is always false, because
-	// that signer is self-signed and proves nothing beyond key possession.
+	// SignerAuthenticated is true ONLY for a RenewalReq verified against the
+	// device anchor. A PKCSReq signer is self-signed, so it is always false.
 	SignerAuthenticated bool
 }
 
@@ -37,12 +36,8 @@ type Parser struct {
 	ParseCSR func(der []byte) (*x509.CertificateRequest, error)
 }
 
-// Parse verifies and decodes a PKIOperation body.
-//
-// Order matters and is defensive: the outer signature is checked before the
-// envelope is decrypted, so an unauthenticated caller cannot make the broker
-// perform an RSA private-key operation without first producing a well-formed
-// signed message.
+// Parse verifies and decodes a PKIOperation. The outer signature is checked
+// before decryption, so a caller cannot force an RSA operation for free.
 func (p *Parser) Parse(der []byte) (*Request, error) {
 	if p.ParseCSR == nil {
 		return nil, errors.New("scep: no CSR parser configured")
@@ -64,17 +59,12 @@ func (p *Parser) Parse(der []byte) (*Request, error) {
 		return nil, err
 	}
 
-	// 3. Establish what the signer actually proves.
-	//
-	// SECURITY: a PKCSReq signer is self-signed by definition (RFC 8894 §3.1).
-	// It stays unauthenticated, and the caller must not populate
-	// authz.Request.ClientCert from it — doing so would let a device pin issued
-	// names to a certificate it minted itself.
+	// 3. SECURITY: a PKCSReq signer is self-signed (RFC 8894 §3.1); ClientCert
+	// must not come from it, or a device pins names to a cert it minted.
 	authenticated := false
 	if attrs.MessageType == RenewalReq {
-		// A renewal signer is the device's current certificate and must chain
-		// to the device anchor. Re-verify the whole message against it rather
-		// than trusting the earlier signature-only pass.
+		// Re-verify the whole message against the device anchor rather than
+		// trusting the earlier signature-only pass.
 		chained, err := p.Verifier.VerifyChain(der, p.DeviceRoots)
 		if err != nil {
 			return nil, fmt.Errorf("scep: renewal signer not trusted: %w", err)
@@ -122,9 +112,8 @@ func (r *Responder) Success(req *Request, issued *x509.Certificate) ([]byte, err
 	if err != nil {
 		return nil, err
 	}
-	// Encrypted to the requester's own certificate: for a PKCSReq that is the
-	// self-signed one, which is exactly right — only the holder of that key can
-	// open the reply, so an attacker who replays a request cannot read it.
+	// Encrypted to the requester's own certificate, so only the holder of that
+	// key can open the reply — a replayer cannot read it.
 	enveloped, err := cms.Encrypt(certsOnly, req.Signer)
 	if err != nil {
 		return nil, err

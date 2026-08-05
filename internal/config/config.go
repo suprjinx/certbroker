@@ -30,17 +30,14 @@ type Config struct {
 	Audit     Audit     `yaml:"audit"`
 }
 
-// SCEP configures the optional SCEP listener (RFC 8894). Disabled by default.
-//
-// SCEP is plain HTTP by design — the protocol carries its own CMS signing and
-// encryption — so the listener must be bound to a trusted network.
+// SCEP configures the optional RFC 8894 listener, off by default. Plain HTTP by
+// design (CMS carries its own crypto), so bind it to a trusted network.
 type SCEP struct {
 	Enabled bool `yaml:"enabled"`
 	// ListenAddr is the plain-HTTP SCEP listener, e.g. ":8080".
 	ListenAddr string `yaml:"listen_addr"`
-	// RACertFile and RAKeyFile are the broker's own RSA identity: requests are
-	// encrypted to this certificate and responses signed by this key. Unlike
-	// EST, SCEP requires the broker to hold a key at rest.
+	// RACertFile and RAKeyFile are the broker's own RSA identity — the one key
+	// at rest that EST does not need.
 	RACertFile string `yaml:"ra_cert_file"`
 	RAKeyFile  string `yaml:"ra_key_file"`
 	// AllowSHA1 re-admits SHA-1 for clients too old to do better. Off by
@@ -328,9 +325,8 @@ func (c *Config) Validate() error {
 		if c.SCEP.RACertFile == "" || c.SCEP.RAKeyFile == "" {
 			return fmt.Errorf("scep.ra_cert_file and scep.ra_key_file are required when SCEP is enabled")
 		}
-		// SCEP's only bootstrap authenticator is the challengePassword: its
-		// signer is self-signed and there is no mTLS. Without a challenge
-		// backend, enrollment would rest on the inventory alone.
+		// SCEP has no mTLS and a self-signed signer, so the challengePassword is
+		// its only bootstrap authenticator.
 		switch c.Challenge.Backend {
 		case "", "none":
 			if !c.Policy.AllowUnauthenticatedEnrollment {
@@ -419,9 +415,8 @@ func poolFromFile(path string) (*x509.CertPool, error) {
 	return pool, nil
 }
 
-// SCEPRAIdentity loads the RA certificate and key used to decrypt SCEP requests
-// and sign responses. The key must be RSA: SCEP clients do RSA key transport,
-// so an EC key cannot decrypt the envelope.
+// SCEPRAIdentity loads the RA certificate and key. RSA only: SCEP clients do
+// key transport, so an EC key cannot decrypt the envelope.
 func (c *Config) SCEPRAIdentity() (*x509.Certificate, crypto.PrivateKey, error) {
 	pair, err := tls.LoadX509KeyPair(c.SCEP.RACertFile, c.SCEP.RAKeyFile)
 	if err != nil {

@@ -74,9 +74,8 @@ func mustSign(t *testing.T, content []byte, kp *keypair, opts SignOptions) []byt
 
 // --- the security-critical distinction ---------------------------------------
 
-// TestVerifySignatureAcceptsSelfSigned is the PKCSReq case: the signature is
-// intact but the signer proves nothing. It must verify, and it must be flagged
-// as unchained so callers cannot mistake it for an identity.
+// TestVerifySignatureAcceptsSelfSigned is the PKCSReq case: it must verify, and
+// be flagged unchained so callers cannot mistake the signer for an identity.
 func TestVerifySignatureAcceptsSelfSigned(t *testing.T) {
 	rogue := issue(t, "attacker", nil, false)
 	der := mustSign(t, []byte("payload"), rogue, SignOptions{})
@@ -97,9 +96,8 @@ func TestVerifySignatureAcceptsSelfSigned(t *testing.T) {
 	}
 }
 
-// TestVerifyChainRejectsSelfSigned is the invariant that keeps a PKCSReq signer
-// from being laundered into an authenticated identity: the same message that
-// passes VerifySignature must fail VerifyChain against a real anchor.
+// TestVerifyChainRejectsSelfSigned: a message that passes VerifySignature must
+// fail VerifyChain, so a PKCSReq signer cannot become an identity.
 func TestVerifyChainRejectsSelfSigned(t *testing.T) {
 	_, deviceRoots := newCA(t, "device CA")
 	rogue := issue(t, "attacker", nil, false)

@@ -114,6 +114,20 @@ services:
       - ./pki:/pki:ro
     restart: "no"
 
+  # sscep (certnanny), an independent RFC 8894 client. Requires scep.enabled
+  # in config.yaml. Behind a profile; use `make dev-scepclient`.
+  scepclient:
+    build:
+      context: ./scepclient
+    profiles: ["interop"]
+    depends_on:
+      - certbroker
+    environment:
+      URL: http://certbroker:8080/
+      CN: device01.example.com
+      CHALLENGE: dev-challenge-secret
+    restart: "no"
+
 volumes:
   # Carries provision output (AppRole SecretID, device CA) to the broker.
   shared:

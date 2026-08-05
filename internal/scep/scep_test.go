@@ -220,11 +220,8 @@ func certRepStatus(t *testing.T, resp *http.Response) PKIStatus {
 
 // --- the central invariant ----------------------------------------------------
 
-// TestPKCSReqSignerIsNotAuthenticated is the invariant the whole SCEP design
-// rests on. A PKCSReq signer is self-signed and attacker-generated; if it
-// reached authz.Request.ClientCert, StandardConstraints would pin issued names
-// to a certificate the requester minted, inverting identity continuity into a
-// rubber stamp. See docs/threat-model.md T1 and §8.
+// TestPKCSReqSignerIsNotAuthenticated is the invariant the SCEP design rests on:
+// a self-signed signer reaching ClientCert would invert identity continuity.
 func TestPKCSReqSignerIsNotAuthenticated(t *testing.T) {
 	h := newHarness(t)
 

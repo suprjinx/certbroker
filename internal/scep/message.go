@@ -1,8 +1,5 @@
-// Package scep implements the SCEP protocol (RFC 8894) on top of internal/cms.
-//
-// SCEP differs from EST in one way that shapes everything here: the broker must
-// hold a private key. Requests are encrypted to it and responses are signed by
-// it. "No CA key on the broker" still holds; "no key at rest" does not.
+// Package scep implements RFC 8894 over internal/cms. Unlike EST it requires the
+// broker to hold a key: "no CA key" still holds, "no key at rest" does not.
 package scep
 
 import (
@@ -88,9 +85,8 @@ const (
 	FailBadAlg FailInfo = "0"
 	// FailBadMessageCheck means the signature or integrity check failed.
 	FailBadMessageCheck FailInfo = "1"
-	// FailBadRequest means the request was refused — the catch-all for every
-	// authorization denial, so a client cannot distinguish "unknown device"
-	// from "wrong name" from "bad challenge".
+	// FailBadRequest is the catch-all for every authorization denial, so a client
+	// cannot tell "unknown device" from "wrong name" from "bad challenge".
 	FailBadRequest FailInfo = "2"
 	// FailBadTime means the signing time was out of range.
 	FailBadTime FailInfo = "3"

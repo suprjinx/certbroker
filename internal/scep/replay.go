@@ -7,17 +7,8 @@ import (
 	"time"
 )
 
-// ReplayCache rejects a transactionID/senderNonce pair the broker has already
-// answered.
-//
-// EST needs no equivalent: TLS gives each request its own freshness. A SCEP
-// request is a signed blob that stays valid wherever it is replayed, so without
-// this a captured PKCSReq can be resubmitted indefinitely — every replay
-// consuming a single-use challenge slot or minting another certificate.
-//
-// Process-local, like the OTP store: it does not survive a restart and does not
-// coordinate across replicas. Sized and swept so an attacker cannot grow it
-// without bound.
+// ReplayCache rejects an already-answered transactionID/senderNonce pair: EST
+// gets freshness from TLS, a SCEP message stays valid wherever replayed.
 type ReplayCache struct {
 	mu      sync.Mutex
 	seen    map[string]time.Time
@@ -50,12 +41,8 @@ func NewReplayCache(ttl time.Duration, maxSize int) *ReplayCache {
 	}
 }
 
-// Check records the pair and reports whether it is fresh. A false return means
-// the request is a replay and must be refused.
-//
-// Recording happens on first sight rather than after successful issuance: a
-// request that failed midway must not be retryable either, since the failure
-// may be exactly what the attacker is probing.
+// Check records the pair and reports whether it is fresh. Recorded on first
+// sight, so a request that failed midway is not retryable either.
 func (c *ReplayCache) Check(txID TransactionID, nonce Nonce) bool {
 	key := replayKey(txID, nonce)
 	now := c.now()
@@ -73,10 +60,8 @@ func (c *ReplayCache) Check(txID TransactionID, nonce Nonce) bool {
 	return true
 }
 
-// evictLocked drops expired entries, and if none had expired, clears the table
-// outright. Dropping live entries risks admitting a replay; refusing all new
-// requests would be a denial of service. Under a flood the table is attacker
-// traffic anyway, so a reset is the lesser harm — and the TTL keeps this rare.
+// evictLocked drops expired entries, clearing the table outright if none had
+// expired. Under a flood the table is attacker traffic, so a reset is safest.
 func (c *ReplayCache) evictLocked(now time.Time) {
 	for k, expiry := range c.seen {
 		if !now.Before(expiry) {

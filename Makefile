@@ -82,8 +82,12 @@ dev-enroll:
 dev-estclient:
 	$(COMPOSE) run --rm --build -e EXPECT_OPEN estclient
 
+## dev-scepclient: SCEP interop run using sscep (needs scep.enabled)
+dev-scepclient:
+	$(COMPOSE) run --rm --build scepclient
+
 ## clean: remove build output and generated dev material
 clean:
 	rm -rf bin coverage.out deploy/pki
 
-.PHONY: help build test test-race test-integration cover vet fmt vuln check image certs dev-up dev-down dev-logs dev-enroll dev-estclient clean
+.PHONY: help build test test-race test-integration cover vet fmt vuln check image certs dev-up dev-down dev-logs dev-enroll dev-estclient dev-scepclient clean

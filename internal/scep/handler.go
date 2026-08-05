@@ -50,11 +50,10 @@ type Options struct {
 	Authorizer  authz.Authorizer
 	// ParseCSR validates a recovered PKCS#10 (PoP, key type, key bounds).
 	ParseCSR func(der []byte) (*x509.CertificateRequest, error)
-	// ChallengePassword extracts the PKCS#9 challengePassword. Injected rather
-	// than imported: it is a PKCS#10 concern shared with EST, and scep must not
-	// depend on est.
+	// ChallengePassword extracts the PKCS#9 attribute. Injected, not imported:
+	// it is shared with EST and scep must not depend on est.
 	ChallengePassword func(*x509.CertificateRequest) (string, error)
-	// VerifyIssued re-checks an issued certificate against the decision, the
+	// VerifyIssued re-checks an issued certificate against the decision — the
 	// same backstop EST applies against permissive OpenBao roles.
 	VerifyIssued func(cert *x509.Certificate, c authz.CertConstraints) error
 	// Digests is the CMS digest allowlist; empty uses cms.DefaultDigests.
@@ -161,10 +160,8 @@ func (h *handler) getCACert(w http.ResponseWriter, r *http.Request) {
 	w.Write(der)
 }
 
-// getCACaps advertises what this server supports. Deliberately conservative:
-// SHA-1 and DES are omitted, GetNextCACert is absent because there is no
-// rollover support, and POSTPKIOperation avoids URL-length limits on the
-// base64 GET form.
+// getCACaps is deliberately conservative: no SHA-1, no DES, and no
+// GetNextCACert, since there is no rollover support.
 func (h *handler) getCACaps(w http.ResponseWriter, _ *http.Request) {
 	caps := []string{
 		"POSTPKIOperation",
@@ -258,12 +255,8 @@ func (h *handler) pkiOperation(w http.ResponseWriter, r *http.Request) {
 	writePKIMessage(w, out)
 }
 
-// authzRequest maps a SCEP request onto the shared authorization pipeline.
-//
-// SECURITY: ClientCert is populated ONLY when the signer chained to the device
-// anchor. A PKCSReq signer is self-signed and must never reach this field, or
-// StandardConstraints would pin issued names to a certificate the requester
-// generated — see docs/threat-model.md T1 and §8.
+// authzRequest maps a SCEP request onto the shared pipeline. SECURITY:
+// ClientCert is set ONLY for a device-anchor-verified signer — see T15.
 func (h *handler) authzRequest(req *Request, r *http.Request) authz.Request {
 	az := authz.Request{
 		Operation:         authz.OpSimpleEnroll,
@@ -280,9 +273,8 @@ func (h *handler) authzRequest(req *Request, r *http.Request) authz.Request {
 	return az
 }
 
-// challengePassword extracts the challenge, tolerating a parse failure: a
-// malformed attribute means no secret was supplied, which the pipeline then
-// treats as unauthenticated rather than as an error.
+// challengePassword tolerates a parse failure: no secret supplied, which the
+// pipeline then treats as unauthenticated rather than as an error.
 func (h *handler) challengePassword(csr *x509.CertificateRequest) string {
 	if h.opts.ChallengePassword == nil {
 		return ""

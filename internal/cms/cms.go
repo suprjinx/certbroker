@@ -1,9 +1,5 @@
-// Package cms wraps the CMS operations SCEP needs — verifying SignedData and
-// encrypting/decrypting EnvelopedData — over github.com/smallstep/pkcs7.
-//
-// The wrapper exists to keep policy out of the protocol layer: it enforces an
-// algorithm allowlist, and it separates "the signature is intact" from "the
-// signer is trusted", which SCEP needs to treat very differently.
+// Package cms wraps smallstep/pkcs7 for SCEP: it enforces an algorithm
+// allowlist and separates "signature intact" from "signer trusted".
 package cms
 
 import (
@@ -16,9 +12,8 @@ import (
 	"github.com/smallstep/pkcs7"
 )
 
-// The library selects the content-encryption algorithm through a package-level
-// global that defaults to DES-CBC. Set it once here, before any goroutine can
-// run, because there is no per-call option and mutating it later would race.
+// The library picks content encryption from a global defaulting to DES-CBC.
+// Set once here: there is no per-call option and mutating it later would race.
 func init() {
 	pkcs7.ContentEncryptionAlgorithm = pkcs7.EncryptionAlgorithmAES256CBC
 }
@@ -35,9 +30,8 @@ var (
 	SHA512 = pkcs7.OIDDigestAlgorithmSHA512
 )
 
-// DefaultDigests is the allowlist applied when none is configured. SHA-1 is
-// excluded: it is collision-broken, and SCEP clients old enough to require it
-// should be an explicit, recorded decision rather than a default.
+// DefaultDigests excludes SHA-1: it is collision-broken, so admitting it must
+// be a recorded decision rather than a default.
 var DefaultDigests = []asn1.ObjectIdentifier{SHA256, SHA384, SHA512}
 
 // Verifier checks CMS SignedData against an algorithm allowlist.
@@ -68,13 +62,8 @@ func (s *Signed) UnmarshalAttribute(oid asn1.ObjectIdentifier, out any) error {
 	return s.p7.UnmarshalSignedAttribute(oid, out)
 }
 
-// VerifySignature parses der and checks the signature is intact and made by the
-// embedded signer certificate. It does NOT establish trust: the signer may be
-// self-signed and attacker-generated.
-//
-// This is the correct call for a SCEP PKCSReq, whose signer certificate is
-// self-signed by definition (RFC 8894 §3.1) and authenticates nothing. Callers
-// MUST NOT treat the returned Signer as an authenticated identity.
+// VerifySignature checks the signature is intact but establishes NO trust — the
+// signer may be self-signed. Correct for a PKCSReq; the Signer is not an identity.
 func (v *Verifier) VerifySignature(der []byte) (*Signed, error) {
 	p7, err := v.parse(der)
 	if err != nil {
@@ -86,11 +75,8 @@ func (v *Verifier) VerifySignature(der []byte) (*Signed, error) {
 	return v.signed(p7, false)
 }
 
-// VerifyChain parses der, checks the signature, and verifies the signer against
-// roots. A signer accepted here is an authenticated identity.
-//
-// This is the correct call for a SCEP RenewalReq, whose signer is the device's
-// current certificate and must chain to the device trust anchor.
+// VerifyChain also verifies the signer against roots, so an accepted signer IS
+// an identity. Correct for a RenewalReq, whose signer is the device cert.
 func (v *Verifier) VerifyChain(der []byte, roots *x509.CertPool) (*Signed, error) {
 	if roots == nil {
 		return nil, errors.New("cms: no trust anchor configured for this operation")
@@ -150,10 +136,8 @@ func (v *Verifier) signed(p7 *pkcs7.PKCS7, chained bool) (*Signed, error) {
 	return &Signed{Content: p7.Content, Signer: signer, Chained: chained, p7: p7}, nil
 }
 
-// Decrypt opens an EnvelopedData addressed to cert, using key.
-//
-// This runs on unauthenticated input — an RSA private-key operation an attacker
-// can trigger at will — so callers must rate-limit and size-bound it.
+// Decrypt opens an EnvelopedData addressed to cert. Runs an RSA private-key
+// operation on unauthenticated input: callers must rate-limit and size-bound it.
 func Decrypt(der []byte, cert *x509.Certificate, key crypto.PrivateKey) ([]byte, error) {
 	if len(der) == 0 {
 		return nil, errors.New("cms: empty enveloped message")
