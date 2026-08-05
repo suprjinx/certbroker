@@ -1,11 +1,14 @@
 # certbroker
 
-A certificate enrollment broker. Devices enroll over **EST** (RFC 7030);
-certbroker decides whether each device may hold the certificate it is asking
-for, then forwards a constrained issuance request to **OpenBao**'s PKI mount.
+A certificate enrollment broker. Devices enroll over **EST** (RFC 7030) or
+**SCEP** (RFC 8894); certbroker decides whether each device may hold the
+certificate it is asking for, then forwards a constrained issuance request to
+**OpenBao**'s PKI mount.
 
 ```
-Device ──mTLS──▶ [L4 passthrough] ──▶ certbroker ──AppRole──▶ OpenBao pki/sign
+Device ──mTLS, EST─────▶ [L4 passthrough] ─┐
+                                           ├─▶ certbroker ──AppRole──▶ OpenBao pki/sign
+Device ──CMS/HTTP, SCEP────────────────────┘
 ```
 
 ## Why
@@ -38,9 +41,10 @@ enforce.
 
 ## Status
 
-EST is complete and exercised end to end against a real OpenBao. SCEP
-(RFC 8894) is designed but not implemented — see `CLAUDE.md` for the decisions
-already taken.
+Both protocols are complete and exercised end to end against a real OpenBao,
+each also driven by an independent third-party client.
+
+### EST (RFC 7030) — mTLS, `:8443`
 
 | Endpoint | |
 |---|---|
@@ -50,9 +54,23 @@ already taken.
 | `/serverkeygen` | broker-generated key, multipart response |
 | `/csrattrs` | 204 when unset |
 
-Go 1.26. One dependency: `gopkg.in/yaml.v3`.
+### SCEP (RFC 8894) — plain HTTP, `:8080`, **off by default**
 
-SCEP support is under development.
+| `?operation=` | |
+|---|---|
+| `GetCACert` | RA certificate first, then the CA chain, as certs-only CMS |
+| `GetCACaps` | `POSTPKIOperation`, `Renewal`, `SHA-256`, `SHA-512`, `AES`, `SCEPStandard` |
+| `PKIOperation` | `PKCSReq` enrollment and `RenewalReq` renewal |
+
+Plain HTTP is deliberate — SCEP carries its own CMS signing and encryption — so
+bind the listener to a trusted network. The advertised capabilities are
+conservative: no SHA-1, no DES, and no `GetNextCACert` because there is no
+rollover support. `GetCertInitial`, `GetCert`, and `GetCRL` are refused;
+issuance is synchronous, so nothing is ever pending.
+
+Go 1.26. Two dependencies: `gopkg.in/yaml.v3`, and `github.com/smallstep/pkcs7`
+for CMS — the alternative was hand-rolling ASN.1 parsing of unauthenticated,
+attacker-controlled input.
 
 ## Quickstart
 
@@ -78,7 +96,7 @@ make test-race       # unit tests under the race detector
 make vuln            # govulncheck
 ```
 
-83 unit tests run hermetically with no network. A further 19 need a live OpenBao
+113 unit tests run hermetically with no network. A further 19 need a live OpenBao
 and sit behind the `integration` build tag, so plain `go test ./...` stays clean:
 
 ```bash
@@ -96,13 +114,19 @@ go test ./internal/est/ -run TestVerifyIssuedCatchesSANInjection -v
 ### Interop
 
 ```bash
-make dev-estclient
+make dev-estclient     # EST,  globalsign/est
+make dev-scepclient    # SCEP, certnanny/sscep  (needs scep.enabled)
 ```
 
-Runs [globalsign/est](https://github.com/globalsign/est)'s `estclient` — an
-independent RFC 7030 implementation — against the stack in a container. It walks
-cacerts → enroll → reenroll, then checks that a bootstrap certificate cannot
-renew, an uninventoried CN is refused, and an unauthenticated request is refused.
+Each runs an independent implementation of the protocol against the stack in a
+container. [globalsign/est](https://github.com/globalsign/est)'s `estclient`
+walks cacerts → enroll → reenroll, then checks that a bootstrap certificate
+cannot renew, an uninventoried CN is refused, and an unauthenticated request is
+refused. [certnanny/sscep](https://github.com/certnanny/sscep) — a C client,
+sharing no code or language with the broker — walks getcaps → getca → enroll,
+asserts no weak algorithm is advertised and that an RA certificate is returned,
+then checks that enrollment is refused with no challengePassword, with the wrong
+one, and for an uninventoried CN.
 
 This exists because `deploy/enroll.sh` drives the broker with curl and openssl:
 that proves the wire format but shares our assumptions about it. A different
@@ -113,8 +137,10 @@ implementation does not.
 | Path | |
 |---|---|
 | `cmd/certbroker` | wiring and process lifecycle |
-| `internal/est` | EST protocol: routing, CSR parsing and PoP, mTLS verification, PKCS#7, post-issuance checks |
-| `internal/authz` | the policy engine: identity, inventory, challenge, role selection, constraints |
+| `internal/est` | EST protocol: routing, CSR parsing and PoP, mTLS verification, PKCS#7 |
+| `internal/scep` | SCEP protocol: operation routing, CMS request parsing, signed `CertRep`, replay cache |
+| `internal/cms` | CMS for SCEP over `smallstep/pkcs7` — digest allowlist, "signature intact" kept separate from "signer trusted" |
+| `internal/authz` | the policy engine: identity, inventory, challenge, role selection, constraints, post-issuance checks |
 | `internal/bao` | minimal OpenBao client — AppRole lifecycle plus sign/issue/ca_chain |
 | `internal/limits` | rate limiting and concurrency bounds |
 | `internal/config` | YAML load and validate |
@@ -132,13 +158,19 @@ Secrets are never written in the config file — it carries a file path
 validated at startup and unknown keys are rejected, so a typo fails loudly
 instead of silently disabling a control.
 
+SCEP stays off until `scep.enabled` is set. Turning it on also needs
+`ra_cert_file` and `ra_key_file` — `make dev-up` generates a dev pair via
+`deploy/gen-certs.sh`.
+
 ## Security
 
 [`docs/threat-model.md`](docs/threat-model.md) records the adversary model, 14
 numbered threats with mitigations and residual risk, and a table of known gaps.
-Read it before changing anything in `internal/authz` or `internal/est`.
+Read it before changing anything in `internal/authz`, `internal/est`, or
+`internal/scep`. Its §8 covers what SCEP adds, but still calls it upcoming
+work — the code has since landed.
 
-Two findings from its own review are worth knowing up front:
+Findings worth knowing up front:
 
 - OpenBao PKI roles default to `use_csr_sans=true` and
   `use_csr_common_name=true`, which **merge** the CSR's names with the broker's
@@ -148,6 +180,19 @@ Two findings from its own review are worth knowing up front:
 - An inventory allowlist is not an authenticator. Enrollment requires a verified
   client certificate or a validated challengePassword; open enrollment is
   available but must be turned on deliberately.
+- **SCEP is weaker than EST for a device's first enrollment.** There is no mTLS,
+  and the certificate a device signs that first request with is one it made up
+  itself — anyone can do that, so the broker ignores it when deciding who is
+  asking. The challengePassword is then the only thing proving anything. Give
+  each device its own single-use password rather than sharing one across the
+  fleet. Renewal is stronger: the device signs with the certificate it already
+  has, and the broker checks that against the device CA.
+- **Turning SCEP on puts a private key on the broker.** SCEP needs an RSA key of
+  its own to decrypt requests and sign replies. The broker still holds no CA
+  key, but it is no longer keyless.
+- **SCEP needs replay protection and EST does not.** EST gets that from TLS.
+  SCEP has none, so the broker remembers the transaction ID and sender nonce
+  from each request and refuses a repeat — before it does any issuing work.
 
 ## Documentation
 
@@ -155,4 +200,4 @@ Two findings from its own review are worth knowing up front:
 |---|---|
 | [`docs/runbook.md`](docs/runbook.md) | operating: endpoints, config, routine tasks, hardening checklist, troubleshooting, client interop |
 | [`docs/threat-model.md`](docs/threat-model.md) | assets, trust boundaries, threats, known gaps |
-| [`CLAUDE.md`](CLAUDE.md) | orientation for Claude Code, including SCEP decisions already taken |
+| [`CLAUDE.md`](CLAUDE.md) | orientation for Claude Code: architecture, security invariants, conventions |
