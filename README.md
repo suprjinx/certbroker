@@ -13,15 +13,11 @@ Device ──CMS/HTTP, SCEP─────────────────�
 
 ## Why
 
-Handing devices a direct path to a CA means the CA is the only thing deciding
-what they may have — and a PKI role is a coarse instrument. It can say "names
-under `example.com`, at most 90 days"; it cannot say "*this* device, holding
-*this* bootstrap credential, may have *this* name, once."
+For devices that support EST or SCEP, we can issue certificates from Openbao. This is essentially
+glue-code until such time as the support is added to OpenBao. See these issues for status:
+['OpenBao Issue #1222'](https://github.com/openbao/openbao/issues/1222)
+['OpenBao Issue #1605']( https://github.com/openbao/openbao/issues/1605)
 
-certbroker is the **Registration Authority** that answers that question. It
-holds no CA key, so compromising it does not yield one; it yields the ability to
-request certificates within the bounds the AppRole policy and PKI role already
-enforce.
 
 ## Design goals
 
