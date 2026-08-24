@@ -1,4 +1,4 @@
-// Command certbroker brokers EST (later SCEP) enrollment onto OpenBao's PKI,
+// Command certbroker brokers EST and SCEP enrollment onto OpenBao's PKI,
 // authorizing each device before it issues.
 package main
 

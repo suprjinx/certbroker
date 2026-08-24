@@ -1,8 +1,8 @@
 # certbroker threat model
 
-Scope: the EST enrollment broker as of Phase 4. SCEP is not implemented; §8 
-records the surface it will add. Operational guidance lives in
-[`runbook.md`](runbook.md).
+Scope: the enrollment broker as of Phase 5 — EST and SCEP. Sections 1–7 apply to
+both; §8 covers what SCEP adds, since it drops mTLS and gives the broker a key
+of its own. Operational guidance lives in [`runbook.md`](runbook.md).
 
 ---
 
@@ -24,6 +24,7 @@ Secondary assets:
 | AppRole SecretID | mounted file or env | Attacker can request certs directly from OpenBao, bounded by the policy and role |
 | OpenBao token | broker memory | Same, until it expires (20m default) |
 | Broker TLS server key | mounted file | Impersonate the broker to devices; harvest challengePasswords |
+| SCEP RA key | mounted file, SCEP only | Decrypt enrollment requests in flight and sign responses as the broker — so harvest challengePasswords and hand devices a CA chain of the attacker's choosing |
 | challengePassword secrets | config env / memory store | Enroll as any device the inventory permits |
 | Server-generated device keys | transient, `/serverkeygen` only | Impersonate that device |
 | Audit log | stdout | Discloses fleet inventory and enrollment patterns |
@@ -36,7 +37,10 @@ Secondary assets:
                     ┌── boundary A: the public/device network
                     │
    Device ──mTLS───▶│  L4 passthrough  ──▶  certbroker
+      (EST, :8443)  │                          │
                     │                          │
+   Device ──────────┼──────────────────────────┤
+     (SCEP, :8080)  │                          │
                     └──────────────────────────┼── boundary B: broker → OpenBao
                                                ▼
                                             OpenBao
@@ -46,6 +50,12 @@ Secondary assets:
 the CSR, the challengePassword, the client certificate, the TLS parameters, the
 request body and headers. The client certificate is *evidence*, not identity,
 until it verifies against a configured anchor.
+
+The SCEP listener sits on the same boundary with less protecting it. There is no
+TLS, so nothing about the transport is authenticated in either direction and
+anyone on the path can read and alter what goes by; all the protection is in the
+CMS layer the device signs and encrypts for itself. Bind it to a network you
+already trust, and treat "who is on that network" as part of the control.
 
 The L4 passthrough is inside the trust boundary only in the sense that it does
 not terminate TLS. It cannot be relied on for authentication and does not add
@@ -120,7 +130,7 @@ the failure was silent.
 1. **Prevent** — `use_csr_sans=false`, `use_csr_common_name=false` on every role
    the broker uses. Set in `deploy/provision-openbao.sh`; a checklist item in
    the runbook.
-2. **Detect** — `internal/est/verify.go` re-parses every issued certificate and
+2. **Detect** — `internal/authz/verify.go` re-parses every issued certificate and
    compares its CN, DNS/IP/URI SANs, and lifetime against what the authorizer
    approved. A mismatch means the certificate is withheld (502), logged at ERROR
    with the serial for revocation, and the operator is pointed at the role
@@ -249,15 +259,19 @@ SecretID and every issued certificate are on the wire.
 
 ### T8 — challengePassword disclosure (A1, A4)
 
-The challengePassword travels inside the CSR, protected only by the TLS channel.
+The challengePassword travels inside the CSR. Under EST the TLS channel is the
+only thing protecting it; under SCEP it is the CMS envelope encrypted to the RA
+certificate, so anyone holding the RA key can read it (§8).
 
 **Mitigations.** Compared in constant time (`subtle.ConstantTimeCompare`) in
 both `StaticSecret` and `MemoryStore`, so neither leaks by timing. Never logged.
 
 **Residual.** `StaticSecret` is one secret for the entire fleet: anyone who
 learns it can enroll as any device the inventory permits, and it is replayable
-indefinitely. It exists for SCEP compatibility and bootstrapping; `MemoryStore`
-OTPs are the better control.
+indefinitely. `MemoryStore` OTPs are the better control, and under SCEP the
+difference matters more — there the challengePassword is the *only* thing
+authenticating a first enrollment, so this threat carries weight it does not
+carry under EST.
 
 ### T9 — Server-generated private key exposure (A1)
 
@@ -295,10 +309,18 @@ Every `/simpleenroll` POST makes the broker parse attacker-supplied ASN.1 and
 verify a signature *before* authorization is possible. Proof-of-possession is
 unauthenticated work by definition, and it is the expensive part.
 
-**Mitigations.** Per-source-IP and global token buckets reject before any
-parsing occurs; a concurrency semaphore bounds simultaneous in-handler work and
-sheds with 503 rather than queueing unboundedly. Request bodies are capped
-(256 KiB) and the cap is enforced before parsing. RSA moduli are bounded
+SCEP costs more per request. A `PKIOperation` makes the broker parse a CMS
+envelope — a good deal more complex than a bare PKCS#10 — then RSA-decrypt it
+with the RA key and verify a signature, all before it knows who is asking.
+
+**Mitigations.** The SCEP listener runs behind the same limiter as EST, so the
+paragraphs below cover both. Per-source-IP and global token buckets reject
+before any parsing occurs; a concurrency semaphore bounds simultaneous
+in-handler work and sheds with 503 rather than queueing unboundedly. Request
+bodies are capped (256 KiB for EST, 512 KiB for SCEP, which has to carry the
+envelope) and the cap is enforced before parsing. The CMS digest algorithm is
+checked against the allowlist before any signature is verified, the same
+cheap-check-first ordering the key size gets. RSA moduli are bounded
 (2048–8192) and, critically, **the key size is checked before the signature is
 verified**, so an oversized modulus cannot force the expensive path. Per-call
 OpenBao deadlines stop a wedged upstream from pinning request goroutines and
@@ -313,7 +335,9 @@ other. The bucket table is bounded (65536) with eviction, so tracking cannot
 itself exhaust memory, but under heavy source-address churn eviction may hand a
 fresh burst to a returning attacker. A distributed attacker below the per-client
 limit is caught only by the global limiter, which sheds legitimate traffic too —
-availability is preserved, fairness is not.
+availability is preserved, fairness is not. The two listeners share one limiter
+but not one cost: the same rate buys an attacker more work through SCEP than
+through EST, so size the limits for the SCEP figure when both are on.
 
 ### T12 — Connection exhaustion (A1)
 
@@ -350,31 +374,58 @@ management interface; do not expose it beside `:8443`.
 | G10 | No CT logging or issuance reconciliation | Mis-issuance is detected only at the moment it happens | Accepted for now |
 | G11 | OpenBao retries are not idempotency-aware | A network error after signing makes the retry issue a second certificate — constrained, but absent from the audit log | Open; fixing it means dropping retries on POST or tracking issuance out of band |
 | G12 | HTTP Basic (RFC 7030 §3.2.3) is not implemented | A client configured with only a username/password cannot enrol: the credential is not read, so the authentication gate refuses it. Fails closed, but the refusal reason will not mention the password | Mitigated by T14; implementing Basic against the challenge backend remains open |
+| G13 | The SCEP replay cache lives in one process's memory | A restart, or a second replica, forgets what it has already answered, so a captured request becomes replayable again within its TTL | Open; same shared-store problem as G5 |
+| G14 | No SCEP CA rollover (`GetNextCACert` is not advertised or served) | Devices cannot be handed the next CA certificate ahead of a changeover, so renewals have to be timed around it by hand | Accepted for now |
+| G15 | SCEP failure responses carry a generic `badRequest` and no reason | An operator reading a device's log cannot tell why an enrollment was refused; the reason is only in the broker's audit log | Accepted — deliberate, so a prober learns nothing |
 
 ---
 
-## 8. SCEP (Phase 5) — surface not yet present
+## 8. What SCEP adds (Phase 5)
 
-Recorded here so the model is not silently outgrown when SCEP lands.
+SCEP is implemented and off by default (`scep.enabled`). It reuses the whole
+authorization pipeline — the policy engine cannot tell the two protocols apart —
+so §§4–6 apply unchanged. What follows is the part that is genuinely different,
+and it all comes from two facts: there is no TLS, and the broker now holds a key.
 
-- **The broker gains a private key.** SCEP requires an RA keypair to decrypt
-  requests and sign responses. "No CA key on the broker" remains true, but "no
-  key at rest on the broker" stops being true, and T7's blast radius grows.
-- **The request signer is self-signed and authenticates nothing.** If a PKCSReq
-  signer certificate were ever treated as an authenticated identity, T1's
-  mitigation inverts into a rubber stamp — `fromAuthenticatedIdentity` would pin
-  issued names to attacker-chosen values. The invariant to hold: populate
-  `ClientCert` only after verification against a trust anchor.
-- **challengePassword becomes the only bootstrap authenticator**, making T8 the
-  primary risk rather than a secondary one. Single-use OTPs, not a static
-  secret.
-- **Replay becomes a first-class concern.** SCEP needs a transactionID and
-  senderNonce cache; EST relies on TLS for freshness and needs none.
-- **T11 worsens.** Every PKIOperation POST costs an unauthenticated RSA decrypt
-  plus a signature verification — strictly more than EST's PoP check — on top of
-  parsing far more complex attacker-controlled ASN.1 (CMS, not just PKCS#10).
-- **Legacy algorithms.** Interoperability pressure toward SHA-1 and 3DES;
-  default-deny with an explicit opt-in.
+**The broker holds a private key.** SCEP needs an RA keypair to decrypt requests
+and sign responses. "No CA key on the broker" is still true; "no key at rest on
+the broker" is not, and T7's blast radius grows to match — see the RA key row in
+§1. Someone holding it can read every challengePassword in flight and sign
+responses as the broker.
+
+**A first request proves nothing about who sent it.** A `PKCSReq` is signed with
+a certificate the device made for itself, which anyone can do. The handler never
+puts that certificate in `Request.ClientCert`, so the policy engine treats the
+request as unauthenticated and refuses to pin any issued name to it. Were that
+to change, T1's mitigation would invert into a rubber stamp: the broker would
+be pinning names to a value the attacker chose. `RenewalReq` is the opposite
+case — its signer is the device's current certificate, verified against the
+device anchor before anything else happens, which is what makes T4 hold here.
+
+**So the challengePassword carries the whole load at bootstrap.** With no mTLS
+and a signer that proves nothing, it is the only authenticator a new device has.
+Config validation refuses to start SCEP with no challenge backend unless
+`policy.allow_unauthenticated_enrollment` is set explicitly. T8 is therefore a
+primary risk under SCEP rather than a secondary one, and a fleet-wide
+`StaticSecret` is a poor fit: prefer single-use OTPs.
+
+**Replay needs answering directly.** EST gets freshness from TLS. A SCEP message
+is valid wherever and whenever it is replayed, so the broker records each
+transactionID/senderNonce pair on first sight and refuses it thereafter —
+checked before any issuance work, so a request that fails downstream is not
+retryable either. The cache is bounded (100k entries, 15m TTL by default) and
+process-local, which is G13.
+
+**Algorithm choice is not the client's to make.** `GetCACaps` advertises SHA-256,
+SHA-512 and AES and nothing weaker; content encryption is pinned to AES-256-CBC
+rather than the library default of DES. SHA-1 is refused unless `allow_sha1` is
+turned on deliberately, and the digest is checked against the allowlist before
+any signature is verified.
+
+**Everything else is deliberately absent.** `GetCertInitial`, `GetCert` and
+`GetCRL` are refused: issuance is synchronous, so nothing is ever pending, and
+each unimplemented operation is one less parser exposed to boundary A.
+`GetNextCACert` is not offered either, which is G14.
 
 ---
 
@@ -386,7 +437,7 @@ Security-relevant behavior covered by automated tests:
 |---|---|
 | PoP is verified; bad signatures rejected | `est.TestParseCSRBadSignature` |
 | Key size checked before signature | `est.TestKeySizeCheckedBeforeSignature` |
-| Issued cert cannot exceed authorized constraints | `est.TestVerifyIssued*` (9 cases) |
+| Issued cert cannot exceed authorized constraints | `authz.TestVerifyIssued*` (9 cases) |
 | A permissive role cannot leak a substituted CN | `e2e.TestPermissiveRoleCannotSubstituteCN` (real OpenBao) |
 | ...and a correct role still issues | `e2e.TestStrictRoleIssuesTheAuthorizedName` |
 | Bootstrap cert cannot renew | `e2e.TestBootstrapCertCannotRenew` |
@@ -403,8 +454,37 @@ Security-relevant behavior covered by automated tests:
 | Wedged upstream does not pin goroutines | `est.TestUpstreamTimeout` |
 | OpenBao enforces domains/TTL independently | `bao.TestIntegrationOutOfPolicyDomainRejected`, `bao.TestIntegrationTTLCappedByRole` |
 
-Run everything: `make check` (unit), then `make dev-up && make test-integration`
-(live OpenBao).
+SCEP (§8):
 
-**Not yet verified:** no fuzzing of the CSR/ASN.1 parsers, no load testing of
-the limiter under realistic fleet churn, and no external security review.
+| Property | Test |
+|---|---|
+| A self-signed `PKCSReq` signer is not an identity | `scep.TestPKCSReqSignerIsNotAuthenticated` |
+| A `RenewalReq` signer is, once it verifies | `scep.TestRenewalReqSignerIsAuthenticated` |
+| ...and is refused when it does not | `scep.TestRenewalReqWithUntrustedSignerRejected` |
+| A replayed message is rejected | `scep.TestReplayRejected` |
+| The handler will not start without a replay cache | `scep.TestNewHandlerRequiresReplayCache` |
+| Denials return a failure carrying no reason | `scep.TestAuthorizationDenialReturnsFailure`, `scep.TestFailureLeaksNoReason` |
+| Constraints reach the issuer, and an over-broad cert is withheld | `scep.TestConstraintsSentToIssuer`, `scep.TestVerifyIssuedWithholdsOverBroadCert` |
+| No weak algorithm is advertised | `scep.TestGetCACapsOmitsWeakAlgorithms` |
+| SHA-1 refused by default, allowed only on request | `cms.TestSHA1RejectedByDefault`, `cms.TestSHA1AcceptedWhenExplicitlyAllowed` |
+| Digest checked before signature | `cms.TestDigestCheckedBeforeSignature` |
+| "Signature intact" stays separate from "signer trusted" | `cms.TestVerifySignatureAcceptsSelfSigned`, `cms.TestVerifyChainRejectsSelfSigned` |
+| Content encryption is AES, not the library's DES default | `cms.TestContentEncryptionIsAES` |
+| Decryption failures are opaque | `cms.TestDecryptErrorIsOpaque` |
+| Body cap, nonce and transactionID bounds enforced | `scep.TestOversizedBodyRejected`, `scep.TestShortNonceRejected`, `scep.TestOversizedTransactionIDRejected` |
+| Unsupported operations and message types refused | `scep.TestUnknownOperationRejected`, `scep.TestUnsupportedMessageTypeRejected` |
+
+Run everything: `make check` (unit), then `make dev-up && make test-integration`
+(live OpenBao). `make dev-estclient` and `make dev-scepclient` additionally drive
+both protocols with independent third-party clients.
+
+**Not yet verified:** no fuzzing of the CSR, CMS or ASN.1 parsers — a larger gap
+now that SCEP parses attacker-controlled CMS through a third-party library — no
+load testing of the limiter under realistic fleet churn, and no external
+security review.
+
+One rule in §8 has no test behind it: config validation refuses to enable SCEP
+with no challenge backend (`config.go`), but nothing pins that, so removing it
+would go unnoticed. It is the startup guard for the bootstrap authenticator and
+deserves the same treatment `TestRequireChallengeWithoutBackendRejected` gives
+its EST counterpart.

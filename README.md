@@ -92,12 +92,13 @@ auto-unsealed, and reachable over plaintext HTTP. Read the runbook's
 
 ```bash
 make check           # gofmt + go vet + unit tests — the CI gate
+make test            # unit tests
 make test-race       # unit tests under the race detector
 make vuln            # govulncheck
 ```
 
-113 unit tests run hermetically with no network. A further 19 need a live OpenBao
-and sit behind the `integration` build tag, so plain `go test ./...` stays clean:
+Unit tests run standalone. Integration tests need a live OpenBao and sit behind the
+`integration` build tag.
 
 ```bash
 make dev-up
@@ -108,14 +109,14 @@ Integration tests skip rather than fail when `CERTBROKER_TEST_OPENBAO_ADDR` and
 `CERTBROKER_TEST_OPENBAO_TOKEN` are unset. A single test:
 
 ```bash
-go test ./internal/est/ -run TestVerifyIssuedCatchesSANInjection -v
+go test ./internal/authz/ -run TestVerifyIssuedCatchesSANInjection -v
 ```
 
 ### Interop
 
 ```bash
-make dev-estclient     # EST,  globalsign/est
-make dev-scepclient    # SCEP, certnanny/sscep  (needs scep.enabled)
+make dev-estclient     # EST,  globalsign/est container
+make dev-scepclient    # SCEP, certnanny/sscep container (needs scep.enabled)
 ```
 
 Each runs an independent implementation of the protocol against the stack in a
@@ -145,7 +146,7 @@ implementation does not.
 | `internal/limits` | rate limiting and concurrency bounds |
 | `internal/config` | YAML load and validate |
 | `internal/pkcs7` | certs-only SignedData encoder |
-| `deploy/` | compose stack, dev PKI, OpenBao provisioning, interop client |
+| `deploy/` | compose stack, dev PKI, OpenBao provisioning, EST and SCEP interop clients |
 | `docs/` | runbook and threat model |
 
 ## Configuration
@@ -167,8 +168,7 @@ SCEP stays off until `scep.enabled` is set. Turning it on also needs
 [`docs/threat-model.md`](docs/threat-model.md) records the adversary model, 14
 numbered threats with mitigations and residual risk, and a table of known gaps.
 Read it before changing anything in `internal/authz`, `internal/est`, or
-`internal/scep`. Its §8 covers what SCEP adds, but still calls it upcoming
-work — the code has since landed.
+`internal/scep`. §8 covers what SCEP adds on top of EST.
 
 Findings worth knowing up front:
 
