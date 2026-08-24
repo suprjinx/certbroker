@@ -129,6 +129,11 @@ asserts no weak algorithm is advertised and that an RA certificate is returned,
 then checks that enrollment is refused with no challengePassword, with the wrong
 one, and for an uninventoried CN.
 
+Both distinguish a refusal from a rate-limit response, so a negative case cannot
+pass for the wrong reason. [`docs/runbook.md`](docs/runbook.md) §9 covers what
+each step asserts, which CNs the dev inventory permits, and the known vendor
+client incompatibilities.
+
 This exists because `deploy/enroll.sh` drives the broker with curl and openssl:
 that proves the wire format but shares our assumptions about it. A different
 implementation does not.

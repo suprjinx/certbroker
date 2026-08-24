@@ -34,6 +34,13 @@ make dev-logs      # follow broker logs
 make dev-down      # stop everything and delete volumes
 ```
 
+Two further targets drive the broker with third-party clients — see §9:
+
+```bash
+make dev-estclient     # EST,  globalsign/est
+make dev-scepclient    # SCEP, certnanny/sscep  (needs scep.enabled)
+```
+
 `make dev-up` runs, in order:
 
 1. `deploy/gen-certs.sh` — bootstrap CA, broker server cert, one device
@@ -315,20 +322,80 @@ bao write <mount>/roles/<role> use_csr_sans=false use_csr_common_name=false ...
 
 ---
 
-## 9. EST client interop
+## 9. Client interop
 
-`make dev-estclient` runs [globalsign/est](https://github.com/globalsign/est)'s
-`estclient` against the running stack, in a container. It is a *different*
-implementation from ours, unlike `deploy/enroll.sh`, which drives the broker with
-curl and openssl and therefore shares our assumptions about the wire format.
+```bash
+make dev-estclient     # EST,  globalsign/est
+make dev-scepclient    # SCEP, certnanny/sscep  (needs scep.enabled)
+```
 
-It walks cacerts → enroll → reenroll, then checks that a bootstrap certificate
-cannot renew, an uninventoried CN is refused, and reports what happens when a
-client presents only HTTP Basic credentials.
+Both drive the broker with a *different* implementation from ours, unlike
+`deploy/enroll.sh`, which uses curl and openssl and therefore shares our
+assumptions about the wire format. Each walks a happy path and then asserts the
+negative cases that matter.
 
-Failures are asserted on the authorization decision, not merely on a non-zero
-exit: the negative steps explicitly distinguish a 403 from a 429, because the
-per-client rate limiter will otherwise make them pass for the wrong reason.
+**Both assert on the authorization decision, not merely on a non-zero exit.**
+The negative steps distinguish a real refusal from a 429, because the per-client
+rate limiter (`1/s`, burst `5`) will otherwise make them pass for the wrong
+reason — a limiter response is not a policy decision, and a test that cannot
+tell them apart silently stops testing anything. Both scripts retry once after a
+pause and report `inconclusive: rate limited` rather than `PASS` if that fails.
+Note the asymmetry in how the limiter surfaces: EST's client reports a readable
+`rate limit` error, while sscep only ever prints `error while sending message`
+and never surfaces the status code.
+
+### EST — `make dev-estclient`
+
+Runs [globalsign/est](https://github.com/globalsign/est)'s `estclient` in a
+container. It walks cacerts → enroll → reenroll, then checks that a bootstrap
+certificate cannot renew, an uninventoried CN is refused, and reports what
+happens when a client presents only HTTP Basic credentials (step 7, which is the
+open-enrollment gate — see threat-model T6).
+
+### SCEP — `make dev-scepclient`
+
+Runs [certnanny/sscep](https://github.com/certnanny/sscep), a C client sharing
+no code with the broker, built from source in the image. Requires
+`scep.enabled` in the config; `deploy/config.yaml` already sets it.
+
+| Step | Asserts |
+|---|---|
+| 1. `GetCACaps` | `POSTPKIOperation` is advertised, and SHA-1, DES3 and `GetNextCACert` are **not** |
+| 2. `GetCACert` | The response carries the **RA** as well as the CA — without it a client cannot encrypt to the broker |
+| 3. Enroll with no challengePassword | Refused. SCEP has no mTLS and a `PKCSReq` signer is self-signed, so nothing else authenticates the request |
+| 4. Enroll with a challengePassword | Issued |
+| 5. Enroll an uninventoried CN | Refused — see below, the choice of CN matters |
+| 6. Wrong challengePassword | Refused |
+
+There is no re-enrollment step: `RenewalReq` needs a current device certificate
+as the CMS signer, which this script has no way to obtain independently of the
+enrollment it just performed.
+
+### What the dev inventory permits
+
+`deploy/inventory.yaml` deliberately carries a broad entry alongside the pinned
+one, to demonstrate the hazard §5 warns about:
+
+```yaml
+- cn: "*.example.com"
+  allowed_dns:
+    - "*.example.com"
+```
+
+**So `rogue.example.com` is a legitimately inventoried name**, and issuing it is
+correct behaviour, not a bug. A negative test for the inventory gate must use a
+CN outside that suffix — the SCEP script uses `rogue.example.net`.
+
+EST gets away with `rogue.example.com` in its own step 6, but for an unrelated
+reason: `policy.san_constraint: identity` pins issued names to the authenticated
+mTLS identity (`CN=device01.example.com`), so the request never reaches the
+question of what the inventory allows. SCEP has no client certificate, the
+identity is unauthenticated, and the inventory is therefore the **only** name
+gate. The two protocols refuse the same name via different mechanisms.
+
+That difference is the concrete form of the warning in threat-model §8: under a
+fleet-wide static challengePassword, any holder of the shared secret can obtain
+any name the inventory glob permits. Single-use OTPs are what close it.
 
 ### Why not a real vendor image
 
@@ -336,11 +403,14 @@ Cisco XRd and FortiGate-VM would be closer stand-ins, but neither can live in a
 self-contained stack: both are licensed images distributed only to entitled
 accounts (XRd as a tarball from software.cisco.com, gated behind a license
 acceptance). If you have an entitlement, point the appliance at
-`https://<host>:8443/.well-known/est` and it should behave as step 3–4 do —
-but read §10 first, because vendor clients differ from `estclient` in ways that
-matter.
+`https://<host>:8443/.well-known/est` for EST, or `http://<host>:8080/` for
+SCEP, and it should behave as the enroll steps above do — but read *Known client
+incompatibilities* below first, because vendor clients differ from `estclient`
+and `sscep` in ways that matter.
 
 ### Known client incompatibilities
+
+EST:
 
 | Client behaviour | Effect here |
 |---|---|
@@ -350,6 +420,18 @@ matter.
 | Full subject DN (C/ST/L/O/OU) with no SANs | Only the CN survives; the rest is dropped unless the OpenBao role sets it |
 | Re-enrollment falling back to bootstrap on failure (AOS-CX) | The bootstrap credential must stay valid and inventoried for the device's whole life — so it cannot be a single-use OTP, and the device cannot be removed from inventory after first enrollment |
 | A client cert that does not chain to the bootstrap anchor | Logged and **ignored**, not rejected; the request degrades to anonymous (threat-model T6) |
+
+SCEP. Most of these are deliberate omissions — every operation not implemented
+is one less parser at a hostile boundary (see CLAUDE.md, "SCEP"):
+
+| Client behaviour | Effect here |
+|---|---|
+| SHA-1 signing only (common on older embedded clients) | Refused unless `scep.allow_sha1` is set, which logs a loud warning. SHA-1 is collision-broken |
+| DES/3DES content encryption | Unsupported; `internal/cms` does AES only. `sscep` needs `-E aes` |
+| Polling `GetCertInitial` for a PENDING request | Not implemented — issuance is synchronous, so the reply is always final |
+| `GetCert`, `GetCRL`, `GetNextCACert` | Not implemented |
+| Expecting a CA-only `GetCACert` reply | The reply is a `-ra-` chain carrying the RA **and** the CA; a client that assumes a bare CA certificate will not find a key to encrypt to |
+| Renewal without the current device certificate | `RenewalReq` must be CMS-signed by the cert being renewed, verified against the device anchor. A self-signed signer is a `PKCSReq` and is treated as a first enrollment |
 
 ---
 
