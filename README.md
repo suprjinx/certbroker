@@ -15,8 +15,8 @@ Device ──CMS/HTTP, SCEP─────────────────�
 
 For devices that support EST or SCEP, we can issue certificates from Openbao. This is essentially
 glue-code until such time as the support is added to OpenBao. See these issues for status:
-['OpenBao Issue #1222'](https://github.com/openbao/openbao/issues/1222)
-['OpenBao Issue #1605']( https://github.com/openbao/openbao/issues/1605)
+- [OpenBao Issue #1222](https://github.com/openbao/openbao/issues/1222)
+- [OpenBao Issue #1605]( https://github.com/openbao/openbao/issues/1605)
 
 
 ## Design goals
